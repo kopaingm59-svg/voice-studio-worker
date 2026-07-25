@@ -215,7 +215,17 @@ async function verifyTelegramAuth(initData, botToken) {
   const dataCheckString = params.join('\n');
 
   const encoder = new TextEncoder();
-  const secretKey = await crypto.subtle.digest('SHA-256', encoder.encode(botToken));
+
+  // Telegram Mini App (WebApp) validation requires:
+  // secret_key = HMAC_SHA256(key="WebAppData", data=botToken)
+  const webAppDataKey = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode('WebAppData'),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const secretKey = await crypto.subtle.sign('HMAC', webAppDataKey, encoder.encode(botToken));
 
   const key = await crypto.subtle.importKey(
     'raw',
