@@ -1,0 +1,18 @@
+name = "voice-studio-backend"
+main = "worker.js"
+compatibility_date = "2024-09-23"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "voice-studio-db"
+database_id = "PASTE_YOUR_DATABASE_ID_HERE"
+
+# Set these as secrets, NOT here:
+#   wrangler secret put ADMIN_SECRET
+#   wrangler secret put SESSION_SECRET
+#   wrangler secret put TELEGRAM_BOT_TOKEN
+#   wrangler secret put RUNPOD_API_KEY
+#
+# vars (non-secret) can go here if needed:
+[vars]
+RUNPOD_ENDPOINT_ID = "your_runpod_endpoint_id"
