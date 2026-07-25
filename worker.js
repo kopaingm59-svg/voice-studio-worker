@@ -380,13 +380,13 @@ function getLandingHtml() {
         const data = await res.json();
 
         if (res.ok && data.success) {
-          if (data.user.isAdmin) {
+          sessionStorage.setItem('tg_user', JSON.stringify(data.user));
+          if (data.user.isAdmin && data.token) {
             sessionStorage.setItem('admin_token', data.token);
-            window.location.href = '/admin';
-          } else {
-            sessionStorage.setItem('tg_user', JSON.stringify(data.user));
-            window.location.href = '/studio';
           }
+          // Admin ဖြစ်သည်ဖြစ်စေ မဖြစ်သည်ဖြစ်စေ Voice Studio (user UI) ဆီ အရင်ပို့ပါမည်
+          // Admin ဆိုရင် Studio ပေါ်က button ကနေ /admin ဆီ ကိုယ်တိုင်ရွေးပြီးမှ သွားနိုင်ပါမည်
+          window.location.href = '/studio';
         } else {
           document.getElementById('content').innerHTML =
             '<div class="error">' + (data.error || 'Login Failed') + '</div>';
@@ -523,6 +523,7 @@ function getStudioHtml() {
     <h2>Welcome</h2>
     <div class="subtitle" id="who">AI Voice Studio</div>
     <p style="font-size:13px;color:#777;">Voice generation UI ကို ဒီနေရာမှာ ဆက်တည်ဆောက်ပါမယ်။</p>
+    <div id="adminBtnWrap"></div>
   </div>
 
   <script>
@@ -531,6 +532,16 @@ function getStudioHtml() {
       try {
         const u = JSON.parse(stored);
         document.getElementById('who').innerText = 'Hi, ' + (u.first_name || u.username || 'there') + '!';
+
+        if (u.isAdmin) {
+          const wrap = document.getElementById('adminBtnWrap');
+          wrap.innerHTML = '<button id="adminBtn" style="margin-top:16px;">🛠 Go to Admin Panel</button>';
+          document.getElementById('adminBtn').onclick = function () {
+            const token = sessionStorage.getItem('admin_token');
+            if (token) sessionStorage.setItem('admin_token', token);
+            window.location.href = '/admin';
+          };
+        }
       } catch (e) {}
     }
   </script>
