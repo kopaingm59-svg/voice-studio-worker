@@ -139,11 +139,11 @@ function html(body) {
 async function upsertUser(env, userId, { name, username, credits, isAdmin } = {}) {
   await env.DB.prepare(
     `INSERT INTO users (id, name, username, credits, is_admin, updated_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))
+     VALUES (?1, ?2, ?3, COALESCE(?4, 0), ?5, datetime('now'))
      ON CONFLICT(id) DO UPDATE SET
        name = COALESCE(?2, users.name),
        username = COALESCE(?3, users.username),
-       credits = COALESCE(?4, users.credits),
+       credits = COALESCE(?4, users.credits, 0),
        is_admin = COALESCE(?5, users.is_admin),
        updated_at = datetime('now')`
   )
@@ -518,7 +518,7 @@ async function handleAdminPurchaseReview(request, env, corsHeaders) {
 
   if (approve) {
     await env.DB.prepare(
-      `UPDATE users SET credits = credits + ?1, updated_at = datetime('now') WHERE id = ?2`
+      `UPDATE users SET credits = COALESCE(credits, 0) + ?1, updated_at = datetime('now') WHERE id = ?2`
     )
       .bind(purchase.credits, purchase.user_id)
       .run();
@@ -592,7 +592,7 @@ async function handleGenerateStart(request, env, corsHeaders) {
 
   // Job တင်ပြီးသွားမှသာ credits ကို နုတ်ပါ
   await env.DB.prepare(
-    `UPDATE users SET credits = credits - ?1, updated_at = datetime('now') WHERE id = ?2`
+    `UPDATE users SET credits = COALESCE(credits, 0) - ?1, updated_at = datetime('now') WHERE id = ?2`
   )
     .bind(cost, String(userId))
     .run();
@@ -623,7 +623,7 @@ async function handleGenerateStatus(request, env, corsHeaders) {
   // Job fail/cancel ဖြစ်ရင် နုတ်ထားတဲ့ credits ကို ပြန်ထည့်ပေးမည်
   if ((data.status === 'FAILED' || data.status === 'CANCELLED') && userId && cost) {
     await env.DB.prepare(
-      `UPDATE users SET credits = credits + ?1, updated_at = datetime('now') WHERE id = ?2`
+      `UPDATE users SET credits = COALESCE(credits, 0) + ?1, updated_at = datetime('now') WHERE id = ?2`
     )
       .bind(Number(cost), String(userId))
       .run();
