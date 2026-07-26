@@ -77,6 +77,9 @@ export default {
       if (url.pathname === '/api/generate/save-audio' && request.method === 'POST') {
         return await handleSaveAudio(request, env, corsHeaders);
       }
+      if (url.pathname === '/api/generate/send-telegram' && request.method === 'POST') {
+        return await handleSendTelegramAudio(request, env, corsHeaders);
+      }
       if (url.pathname.startsWith('/api/audio/') && request.method === 'GET') {
         return await handleAudioDownload(url.pathname.split('/').pop(), env, corsHeaders);
       }
@@ -635,7 +638,7 @@ async function handleAdminPurchaseReview(request, env, corsHeaders) {
 
 async function handleGenerateStart(request, env, corsHeaders) {
   const body = await request.json();
-  const { userId, text, refAudioBase64, promptText } = body;
+  const { userId, text, refAudioBase64, promptText, speed, style, voiceType } = body;
 
   if (!userId) {
     return json({ error: 'Missing userId' }, 400, corsHeaders);
@@ -667,6 +670,14 @@ async function handleGenerateStart(request, env, corsHeaders) {
     input.reference_audio_base64 = refAudioBase64;
     if (promptText && promptText.trim()) input.prompt_text = promptText.trim();
   }
+  // Speech Speed (0.5x - 1.5x), Speaking Style (Normal/Happy/News/Audio Book etc.),
+  // Voice Type (Female/Male/Multi voice) - Studio UI ကနေ ရွေးလိုက်တဲ့ options
+  const speedNum = Number(speed);
+  if (!isNaN(speedNum) && speedNum > 0) {
+    input.speed = Math.min(Math.max(speedNum, 0.5), 1.5);
+  }
+  if (style) input.style = style;
+  if (voiceType) input.voice_type = voiceType;
 
   const runRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/run`, {
     method: 'POST',
@@ -791,6 +802,50 @@ async function handleAudioDownload(id, env, corsHeaders) {
       'Access-Control-Allow-Origin': '*',
     },
   });
+}
+
+// ===========================================================================
+// Send generated audio directly into the user's Telegram chat (Bot API)
+// - Direct download အဆင်မပြေတဲ့အခါ အသုံးပြုရန် fallback delivery method
+// ===========================================================================
+
+async function handleSendTelegramAudio(request, env, corsHeaders) {
+  const body = await request.json();
+  const { userId, audioBase64, format } = body;
+
+  if (!userId) {
+    return json({ error: 'Missing userId' }, 400, corsHeaders);
+  }
+  if (!audioBase64) {
+    return json({ error: 'Missing audioBase64' }, 400, corsHeaders);
+  }
+  if (!env.TELEGRAM_BOT_TOKEN) {
+    return json({ error: 'Telegram bot token မရှိပါ' }, 500, corsHeaders);
+  }
+
+  const fmt = format || 'wav';
+  const mime = fmt === 'mp3' ? 'audio/mpeg' : `audio/${fmt}`;
+
+  const binary = atob(audioBase64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+  const form = new FormData();
+  form.append('chat_id', String(userId));
+  form.append('audio', new Blob([bytes], { type: mime }), `voice-output.${fmt}`);
+  form.append('caption', 'Ko Paing AI Voice Studio 🎙️');
+
+  const tgRes = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendAudio`, {
+    method: 'POST',
+    body: form,
+  });
+  const tgData = await tgRes.json();
+
+  if (!tgRes.ok || !tgData.ok) {
+    return json({ error: tgData.description || 'Telegram ကို ပို့လို့ မရပါ' }, 500, corsHeaders);
+  }
+
+  return json({ success: true }, 200, corsHeaders);
 }
 
 async function verifyTelegramAuth(initData, botToken) {
@@ -1383,6 +1438,16 @@ ${FAVICON}
   }
   input[type="text"]:focus{ border-color:var(--moss); }
   input::placeholder{ color:#b7b0a2; }
+  select{
+    width:100%; background:transparent; border:none; border-bottom:1px solid var(--line);
+    padding:8px 0 10px; font-family:'Inter', sans-serif; font-size:14px; color:var(--ink);
+    outline:none; transition:border-color .15s ease;
+  }
+  select:focus{ border-color:var(--moss); }
+  input[type="range"]{ width:100%; accent-color:var(--moss); margin-top:8px; }
+  .speedlabel{ color:var(--moss); font-weight:600; }
+  .optionrow{ display:flex; gap:24px; flex-wrap:wrap; }
+  .optionrow > div{ flex:1; min-width:150px; }
   .charcount{ text-align:right; font-family:'IBM Plex Mono', monospace; font-size:11px; color:#a39c8c; margin-top:6px; }
   .charcount.over{ color:var(--wax); }
 
@@ -1439,12 +1504,14 @@ ${FAVICON}
   audio{ width:100%; height:42px; }
   .output-foot{ display:flex; justify-content:space-between; align-items:center; margin-top:16px; gap:12px; }
   .meta{ font-family:'IBM Plex Mono', monospace; font-size:11.5px; color:#8f8879; }
-  a.download{
+  .download{
     font-family:'IBM Plex Mono', monospace; font-size:12px; letter-spacing:0.06em; text-transform:uppercase;
     color:var(--ink); text-decoration:none; border:1px solid var(--ink); padding:10px 18px;
     display:inline-flex; align-items:center; gap:8px; transition:all .15s ease; flex-shrink:0;
+    background:none; cursor:pointer;
   }
-  a.download:hover{ background:var(--ink); color:var(--paper); }
+  .download:hover{ background:var(--ink); color:var(--paper); }
+  .download.disabled{ opacity:0.5; pointer-events:none; }
   footer{
     text-align:center; margin-top:48px; font-family:'IBM Plex Mono', monospace;
     font-size:11px; color:#b7b0a2; letter-spacing:0.04em;
@@ -1467,7 +1534,7 @@ ${FAVICON}
     header{ flex-direction:column; }
     .row{ padding:18px 18px; }
     .output-foot{ flex-direction:column; align-items:stretch; }
-    a.download{ justify-content:center; }
+    .download{ justify-content:center; }
     .top-actions{ position:static; flex-direction:row; justify-content:flex-end; margin-bottom:16px; }
   }
 </style>
@@ -1519,6 +1586,33 @@ ${FAVICON}
         <input type="text" id="promptText" placeholder="Transcript of the voice sample…">
       </div>
     </div>
+
+    <div class="row">
+      <label for="speedRange">Speech Speed <span class="speedlabel" id="speedVal">1.00x</span></label>
+      <input type="range" id="speedRange" min="0.5" max="1.5" step="0.05" value="1">
+    </div>
+
+    <div class="row optionrow">
+      <div>
+        <label for="styleSelect">Speaking Style</label>
+        <select id="styleSelect">
+          <option value="normal">Normal</option>
+          <option value="happy">Happy</option>
+          <option value="sad">Sad</option>
+          <option value="news">News</option>
+          <option value="audiobook">Audio Book</option>
+          <option value="calm">Calm</option>
+        </select>
+      </div>
+      <div>
+        <label for="voiceTypeSelect">Voice Type</label>
+        <select id="voiceTypeSelect">
+          <option value="female">အမျိုးသမီးအသံ (Female)</option>
+          <option value="male">အမျိုးသားအသံ (Male)</option>
+          <option value="multi">Multi Voice</option>
+        </select>
+      </div>
+    </div>
   </div>
 
   <div class="actions">
@@ -1534,7 +1628,10 @@ ${FAVICON}
     <audio id="audioPlayer" controls></audio>
     <div class="output-foot">
       <div class="meta" id="outputMeta">—</div>
-      <a class="download" id="downloadLink" download="voice-output.wav">Download ⭜</a>
+      <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        <a class="download" id="downloadLink" download="voice-output.wav">Download ⭜</a>
+        <button class="download" id="sendTelegramBtn" type="button">📩 Telegram ကို ပို့ပါ</button>
+      </div>
     </div>
   </div>
 
@@ -1574,12 +1671,24 @@ ${FAVICON}
   const audioPlayer   = $('audioPlayer');
   const outputMeta     = $('outputMeta');
   const downloadLink   = $('downloadLink');
+  const sendTelegramBtn = $('sendTelegramBtn');
+
+  const speedRange    = $('speedRange');
+  const speedVal      = $('speedVal');
+  const styleSelect   = $('styleSelect');
+  const voiceTypeSelect = $('voiceTypeSelect');
 
   let refAudioBase64 = null;
   let currentCredits = 0;
   let polling = false;
   let savedAudioUrl = null;
+  let lastAudioBase64 = null;
+  let lastAudioFormat = null;
   const tgWebApp = window.Telegram && window.Telegram.WebApp;
+
+  speedRange.addEventListener('input', () => {
+    speedVal.textContent = parseFloat(speedRange.value).toFixed(2) + 'x';
+  });
 
   if (!tgUser || !tgUser.id) {
     statusLine.textContent = 'Telegram App ကနေ ပြန်ဝင်ပေးပါ။';
@@ -1696,7 +1805,10 @@ ${FAVICON}
           userId: tgUser.id,
           text,
           refAudioBase64: refAudioBase64 || undefined,
-          promptText: promptTextEl.value.trim() || undefined
+          promptText: promptTextEl.value.trim() || undefined,
+          speed: parseFloat(speedRange.value),
+          style: styleSelect.value,
+          voiceType: voiceTypeSelect.value
         })
       });
       const startData = await startRes.json();
@@ -1742,7 +1854,7 @@ ${FAVICON}
         const out = data.output || {};
         if (out.error) throw new Error(out.error);
         if (!out.audio_base64) throw new Error('Finished but returned no audio.');
-        renderAudio(out);
+        await renderAudio(out);
         setStatus('Done.', 'ok');
         return;
       } else if (data.status === 'FAILED') {
@@ -1757,7 +1869,7 @@ ${FAVICON}
     }
   }
 
-  function renderAudio(out){
+  async function renderAudio(out){
     const fmt = out.format || 'wav';
     const mime = fmt === 'mp3' ? 'audio/mpeg' : ('audio/' + fmt);
     const src = 'data:' + mime + ';base64,' + out.audio_base64;
@@ -1767,28 +1879,62 @@ ${FAVICON}
     downloadLink.download = 'voice-output.' + fmt;
     outputMeta.textContent = out.sample_rate ? (out.sample_rate + ' Hz · ' + fmt.toUpperCase()) : fmt.toUpperCase();
 
+    lastAudioBase64 = out.audio_base64;
+    lastAudioFormat = fmt;
+
     savedAudioUrl = null;
-    fetch('/api/generate/save-audio', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        userId: tgUser ? tgUser.id : undefined,
-        audioBase64: out.audio_base64,
-        format: fmt
-      })
-    })
-      .then(res => res.json())
-      .then(data => {
-        if (data && data.success && data.url) {
-          savedAudioUrl = location.origin + data.url;
-          downloadLink.href = savedAudioUrl;
-        }
-      })
-      .catch(() => {});
+    downloadLink.classList.add('disabled');
+    downloadLink.textContent = 'Preparing…';
+    try {
+      const res = await fetch('/api/generate/save-audio', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: tgUser ? tgUser.id : undefined,
+          audioBase64: out.audio_base64,
+          format: fmt
+        })
+      });
+      const data = await res.json();
+      if (data && data.success && data.url) {
+        savedAudioUrl = location.origin + data.url;
+        downloadLink.href = savedAudioUrl;
+      }
+    } catch (e) {
+      // save-audio ရယူ၍ မရရင် data URI (src) အတိုင်းသာ download ဖြစ်ပါစေ
+    } finally {
+      downloadLink.classList.remove('disabled');
+      downloadLink.textContent = 'Download ⭜';
+    }
 
     output.classList.add('show');
     output.scrollIntoView({ behavior:'smooth', block:'nearest' });
   }
+
+  sendTelegramBtn.addEventListener('click', async () => {
+    if (!lastAudioBase64 || !tgUser || !tgUser.id) return;
+    const original = sendTelegramBtn.textContent;
+    sendTelegramBtn.disabled = true;
+    sendTelegramBtn.textContent = 'ပို့နေသည်…';
+    try {
+      const res = await fetch('/api/generate/send-telegram', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: tgUser.id, audioBase64: lastAudioBase64, format: lastAudioFormat })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setStatus('Telegram chat ထဲကို Audio ပို့ပြီးပါပြီ ✓', 'ok');
+      } else {
+        setStatus(data.error || 'Telegram ကို ပို့လို့ မရပါ။', 'err');
+      }
+    } catch (e) {
+      setStatus('Network error — Telegram ကို ပို့လို့ မရပါ။', 'err');
+    } finally {
+      sendTelegramBtn.disabled = false;
+      sendTelegramBtn.textContent = original;
+    }
+  });
 })();
 </script>
 
