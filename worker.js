@@ -349,9 +349,14 @@ async function handlePlansList(request, env, corsHeaders) {
 }
 
 async function handlePaymentMethodsList(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const country = body.country === 'TH' ? 'TH' : 'MM';
+
   const { results } = await env.DB.prepare(
-    'SELECT id, method, account_name, account_number, note FROM payment_methods WHERE is_active = 1 ORDER BY id ASC'
-  ).all();
+    'SELECT id, method, account_name, account_number, note, country FROM payment_methods WHERE is_active = 1 AND country = ?1 ORDER BY id ASC'
+  )
+    .bind(country)
+    .all();
 
   return json({ success: true, methods: results }, 200, corsHeaders);
 }
@@ -483,16 +488,17 @@ async function handleAdminPaymentMethodCreate(request, env, corsHeaders) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
-  const { method, accountName, accountNumber, note } = body;
+  const { method, accountName, accountNumber, note, country } = body;
   if (!method) {
     return json({ error: 'Payment method name လိုအပ်ပါသည်' }, 400, corsHeaders);
   }
+  const countryCode = country === 'TH' ? 'TH' : 'MM';
 
   await env.DB.prepare(
-    `INSERT INTO payment_methods (method, account_name, account_number, note, is_active, updated_at)
-     VALUES (?1, ?2, ?3, ?4, 1, datetime('now'))`
+    `INSERT INTO payment_methods (method, account_name, account_number, note, country, is_active, updated_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, 1, datetime('now'))`
   )
-    .bind(method, accountName || '', accountNumber || '', note || '')
+    .bind(method, accountName || '', accountNumber || '', note || '', countryCode)
     .run();
 
   return json({ success: true }, 200, corsHeaders);
@@ -504,7 +510,7 @@ async function handleAdminPaymentMethodUpdate(request, env, corsHeaders) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
-  const { id, method, accountName, accountNumber, note, is_active } = body;
+  const { id, method, accountName, accountNumber, note, is_active, country } = body;
   if (!id) {
     return json({ error: 'Missing payment method id' }, 400, corsHeaders);
   }
@@ -516,6 +522,7 @@ async function handleAdminPaymentMethodUpdate(request, env, corsHeaders) {
        account_number = COALESCE(?4, account_number),
        note = COALESCE(?5, note),
        is_active = COALESCE(?6, is_active),
+       country = COALESCE(?7, country),
        updated_at = datetime('now')
      WHERE id = ?1`
   )
@@ -525,7 +532,8 @@ async function handleAdminPaymentMethodUpdate(request, env, corsHeaders) {
       accountName ?? null,
       accountNumber ?? null,
       note ?? null,
-      is_active !== undefined ? (is_active ? 1 : 0) : null
+      is_active !== undefined ? (is_active ? 1 : 0) : null,
+      country === 'TH' || country === 'MM' ? country : null
     )
     .run();
 
@@ -1255,6 +1263,9 @@ function getAdminDashboardHtml() {
     }
 
     // ---------------- SETTINGS ----------------
+    let paymentMethodsData = [];
+    let currentPayCountry = 'MM';
+
     async function loadSettings() {
       const wrap = document.getElementById('panel-settings');
       wrap.innerHTML = '<div class="empty">Loading…</div>';
@@ -1263,7 +1274,6 @@ function getAdminDashboardHtml() {
         wrap.innerHTML = '<div class="error">' + (data.error || 'Failed to load settings') + '</div>';
         return;
       }
-      const p = data.paymentInfo || {};
       wrap.innerHTML = \`
         <div class="card">
           <h3>Signup Bonus</h3>
@@ -1274,16 +1284,22 @@ function getAdminDashboardHtml() {
         </div>
         <div class="card">
           <h3>Payment Setup</h3>
-          <div class="field"><label>Payment Method (e.g. KBZPay, Wave Pay)</label><input id="payMethod" value="\${p.method || ''}"></div>
-          <div class="row2">
-            <div class="field"><label>Account Name</label><input id="payName" value="\${p.account_name || ''}"></div>
-            <div class="field"><label>Account Number</label><input id="payNumber" value="\${p.account_number || ''}"></div>
+          <div class="row2" style="margin-bottom:12px;">
+            <button class="btn small" id="payCountryMM" onclick="switchPayCountry('MM')">🇲🇲 Myanmar</button>
+            <button class="btn small ghost" id="payCountryTH" onclick="switchPayCountry('TH')">🇹🇭 Thailand</button>
           </div>
-          <div class="field"><label>Note / Instructions</label><textarea id="payNote">\${p.note || ''}</textarea></div>
+          <div class="field"><label>Payment Method (e.g. KBZPay, Wave Pay / PromptPay, TrueMoney)</label><input id="payMethod"></div>
+          <div class="row2">
+            <div class="field"><label>Account Name</label><input id="payName"></div>
+            <div class="field"><label>Account Number</label><input id="payNumber"></div>
+          </div>
+          <div class="field"><label>Note / Instructions</label><textarea id="payNote"></textarea></div>
           <button class="btn" onclick="savePaymentInfo()">Save</button>
           <div class="msg" id="paymentMsg"></div>
         </div>
       \`;
+
+      await loadPaymentMethods();
     }
 
     async function saveSignupBonus() {
@@ -1294,17 +1310,43 @@ function getAdminDashboardHtml() {
       msg.className = 'msg ' + (ok && data.success ? 'ok' : 'err');
     }
 
+    async function loadPaymentMethods() {
+      const { ok, data } = await api('/api/admin/payment-methods/list');
+      paymentMethodsData = (ok && data.success) ? data.methods : [];
+      fillPayForm(currentPayCountry);
+    }
+
+    function fillPayForm(country) {
+      currentPayCountry = country;
+      document.getElementById('payCountryMM').className = 'btn small' + (country === 'MM' ? '' : ' ghost');
+      document.getElementById('payCountryTH').className = 'btn small' + (country === 'TH' ? '' : ' ghost');
+      const m = paymentMethodsData.find(x => (x.country || 'MM') === country) || {};
+      document.getElementById('payMethod').value = m.method || '';
+      document.getElementById('payName').value = m.account_name || '';
+      document.getElementById('payNumber').value = m.account_number || '';
+      document.getElementById('payNote').value = m.note || '';
+    }
+
+    function switchPayCountry(country) {
+      fillPayForm(country);
+    }
+
     async function savePaymentInfo() {
-      const paymentInfo = {
-        method: document.getElementById('payMethod').value.trim(),
-        account_name: document.getElementById('payName').value.trim(),
-        account_number: document.getElementById('payNumber').value.trim(),
-        note: document.getElementById('payNote').value.trim()
-      };
+      const method = document.getElementById('payMethod').value.trim();
+      const accountName = document.getElementById('payName').value.trim();
+      const accountNumber = document.getElementById('payNumber').value.trim();
+      const note = document.getElementById('payNote').value.trim();
       const msg = document.getElementById('paymentMsg');
-      const { ok, data } = await api('/api/admin/settings/update', { paymentInfo });
+      if (!method) { msg.textContent = 'Payment method name လိုအပ်ပါသည်'; msg.className = 'msg err'; return; }
+
+      const existing = paymentMethodsData.find(x => (x.country || 'MM') === currentPayCountry);
+      const { ok, data } = existing
+        ? await api('/api/admin/payment-methods/update', { id: existing.id, method, accountName, accountNumber, note, country: currentPayCountry, is_active: true })
+        : await api('/api/admin/payment-methods/create', { method, accountName, accountNumber, note, country: currentPayCountry });
+
       msg.textContent = ok && data.success ? 'Saved!' : (data.error || 'Failed');
       msg.className = 'msg ' + (ok && data.success ? 'ok' : 'err');
+      if (ok && data.success) await loadPaymentMethods();
     }
 
     // ---------------- PURCHASES ----------------
@@ -1630,7 +1672,6 @@ ${FAVICON}
     <div class="output-foot">
       <div class="meta" id="outputMeta">—</div>
       <div style="display:flex; gap:10px; flex-wrap:wrap;">
-        <a class="download" id="downloadLink" download="voice-output.wav">Download ⭜</a>
         <button class="download" id="sendTelegramBtn" type="button">📩 Telegram ကို ပို့ပါ</button>
       </div>
     </div>
@@ -1671,7 +1712,6 @@ ${FAVICON}
   const output       = $('output');
   const audioPlayer   = $('audioPlayer');
   const outputMeta     = $('outputMeta');
-  const downloadLink   = $('downloadLink');
   const sendTelegramBtn = $('sendTelegramBtn');
 
   const paceSelect    = $('paceSelect');
@@ -1681,10 +1721,8 @@ ${FAVICON}
   let refAudioBase64 = null;
   let currentCredits = 0;
   let polling = false;
-  let savedAudioUrl = null;
   let lastAudioBase64 = null;
   let lastAudioFormat = null;
-  const tgWebApp = window.Telegram && window.Telegram.WebApp;
 
   if (!tgUser || !tgUser.id) {
     statusLine.textContent = 'Telegram App ကနေ ပြန်ဝင်ပေးပါ။';
@@ -1756,17 +1794,6 @@ ${FAVICON}
     dropzone.classList.remove('has-file');
     promptLine.style.display = 'none';
     promptTextEl.value = '';
-  });
-
-  // Telegram Mini App ရဲ့ in-app browser ကနေ audio ကို တိုက်ရိုက် download ဆွဲမရတဲ့
-  // ပြဿနာအတွက် - saved audio ရဲ့ real https URL ကို Chrome (system browser) မှာ
-  // ဖွင့်ပေးပြီး အဲ့ဒီကနေ direct download ချနိုင်အောင် လုပ်ပေးသည်
-  downloadLink.addEventListener('click', e => {
-    if (tgWebApp && savedAudioUrl) {
-      e.preventDefault();
-      tgWebApp.openLink(savedAudioUrl);
-    }
-    // Telegram မဟုတ်ရင် (သို့) savedAudioUrl မရသေးရင် anchor ရဲ့ default download အတိုင်း လုပ်ပါစေ
   });
 
   function setStatus(msg, kind){
@@ -1877,37 +1904,10 @@ ${FAVICON}
     const src = 'data:' + mime + ';base64,' + out.audio_base64;
 
     audioPlayer.src = src;
-    downloadLink.href = src;
-    downloadLink.download = 'voice-output.' + fmt;
     outputMeta.textContent = out.sample_rate ? (out.sample_rate + ' Hz · ' + fmt.toUpperCase()) : fmt.toUpperCase();
 
     lastAudioBase64 = out.audio_base64;
     lastAudioFormat = fmt;
-
-    savedAudioUrl = null;
-    downloadLink.classList.add('disabled');
-    downloadLink.textContent = 'Preparing…';
-    try {
-      const res = await fetch('/api/generate/save-audio', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: tgUser ? tgUser.id : undefined,
-          audioBase64: out.audio_base64,
-          format: fmt
-        })
-      });
-      const data = await res.json();
-      if (data && data.success && data.url) {
-        savedAudioUrl = location.origin + data.url;
-        downloadLink.href = savedAudioUrl;
-      }
-    } catch (e) {
-      // save-audio ရယူ၍ မရရင် data URI (src) အတိုင်းသာ download ဖြစ်ပါစေ
-    } finally {
-      downloadLink.classList.remove('disabled');
-      downloadLink.textContent = 'Download ⭜';
-    }
 
     output.classList.add('show');
     output.scrollIntoView({ behavior:'smooth', block:'nearest' });
@@ -1969,6 +1969,12 @@ function getPlansHtml() {
     .top { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
     .top h1 { font-size: 16px; margin: 0; letter-spacing: 0.5px; }
     a.back { font-size: 12px; color: #666; text-decoration: none; }
+    .country-switch { display: flex; gap: 8px; margin: 16px 0 6px; }
+    .country-switch .c-btn {
+      flex: 1; padding: 9px; border-radius: 6px; border: 1px solid #ddd; background: #fff;
+      font-size: 13px; cursor: pointer; color: #666;
+    }
+    .country-switch .c-btn.active { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
     .plan-card {
       background: #fff; border-radius: 8px; padding: 18px; margin-bottom: 14px;
       box-shadow: 0 4px 12px rgba(0,0,0,0.05); border: 1px solid #eee;
@@ -2015,6 +2021,12 @@ function getPlansHtml() {
     <h1>Plans / Buy Credits</h1>
   </div>
   <a href="/studio" class="back">← Back to Studio</a>
+
+  <div class="country-switch" id="countrySwitch">
+    <button class="c-btn active" data-country="MM" onclick="switchCountry('MM')">🇲🇲 Myanmar</button>
+    <button class="c-btn" data-country="TH" onclick="switchCountry('TH')">🇹🇭 Thailand</button>
+  </div>
+
   <div id="plansWrap" style="margin-top:16px;"><div class="empty">Loading…</div></div>
 
   <div class="modal-bg" id="modalBg">
@@ -2040,6 +2052,14 @@ function getPlansHtml() {
 
     let selectedPlan = null;
     let slipBase64 = null;
+    let selectedCountry = 'MM';
+
+    function switchCountry(country) {
+      selectedCountry = country;
+      document.querySelectorAll('#countrySwitch .c-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.country === country);
+      });
+    }
 
     async function loadPlans() {
       const wrap = document.getElementById('plansWrap');
@@ -2075,9 +2095,9 @@ function getPlansHtml() {
       document.getElementById('modalBg').classList.add('show');
 
       try {
-        const res = await fetch('/api/payment/info', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+        const res = await fetch('/api/payment-methods/list', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ country: selectedCountry }) });
         const data = await res.json();
-        const p = data.paymentInfo || {};
+        const p = (data.methods && data.methods[0]) || {};
         document.getElementById('payInfoBox').innerHTML = p.method ? \`
           <div><span class="k">Method:</span> \${p.method}</div>
           <div><span class="k">Account Name:</span> \${p.account_name || '-'}</div>
