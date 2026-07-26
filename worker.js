@@ -34,6 +34,9 @@ export default {
       if (url.pathname === '/studio') {
         return html(getStudioHtml());
       }
+      if (url.pathname === '/plans') {
+        return html(getPlansHtml());
+      }
 
       // ---- API ---------------------------------------------------------
       if (url.pathname === '/api/auth/telegram' && request.method === 'POST') {
@@ -56,6 +59,52 @@ export default {
       }
       if (url.pathname === '/api/generate/status' && request.method === 'POST') {
         return await handleGenerateStatus(request, env, corsHeaders);
+      }
+
+      // ---- Plans (public) ----------------------------------------------
+      if (url.pathname === '/api/plans/list' && request.method === 'POST') {
+        return await handlePlansList(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/payment/info' && request.method === 'POST') {
+        return await handlePaymentInfo(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/purchase/submit' && request.method === 'POST') {
+        return await handlePurchaseSubmit(request, env, corsHeaders);
+      }
+
+      // ---- Admin: Plans --------------------------------------------------
+      if (url.pathname === '/api/admin/plans/list' && request.method === 'POST') {
+        return await handleAdminPlansList(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/admin/plans/create' && request.method === 'POST') {
+        return await handleAdminPlanCreate(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/admin/plans/update' && request.method === 'POST') {
+        return await handleAdminPlanUpdate(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/admin/plans/delete' && request.method === 'POST') {
+        return await handleAdminPlanDelete(request, env, corsHeaders);
+      }
+
+      // ---- Admin: Settings (Signup Bonus + Payment Setup) ----------------
+      if (url.pathname === '/api/admin/settings/get' && request.method === 'POST') {
+        return await handleAdminSettingsGet(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/admin/settings/update' && request.method === 'POST') {
+        return await handleAdminSettingsUpdate(request, env, corsHeaders);
+      }
+
+      // ---- Admin: Users (Ban / Unban) -------------------------------------
+      if (url.pathname === '/api/admin/users/ban' && request.method === 'POST') {
+        return await handleAdminBanUser(request, env, corsHeaders);
+      }
+
+      // ---- Admin: Purchase Approvals --------------------------------------
+      if (url.pathname === '/api/admin/purchases/list' && request.method === 'POST') {
+        return await handleAdminPurchasesList(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/admin/purchases/review' && request.method === 'POST') {
+        return await handleAdminPurchaseReview(request, env, corsHeaders);
       }
 
       return json({ error: 'Not Found' }, 404, corsHeaders);
@@ -108,6 +157,24 @@ async function upsertUser(env, userId, { name, username, credits, isAdmin } = {}
     .run();
 }
 
+async function getSetting(env, key, defaultValue) {
+  const row = await env.DB.prepare('SELECT value FROM settings WHERE key = ?1').bind(key).first();
+  return row ? row.value : defaultValue;
+}
+
+async function setSetting(env, key, value) {
+  await env.DB.prepare(
+    `INSERT INTO settings (key, value) VALUES (?1, ?2)
+     ON CONFLICT(key) DO UPDATE SET value = ?2`
+  )
+    .bind(key, value)
+    .run();
+}
+
+function requireAdmin(env, token) {
+  return !!token && token === env.SESSION_SECRET;
+}
+
 // ===========================================================================
 // Request Handlers
 // ===========================================================================
@@ -131,9 +198,29 @@ async function handleTelegramAuth(request, env, corsHeaders) {
   // Telegram username ကိုကြည့်ပြီး Admin ဟုတ်/မဟုတ် Auto Detect
   const isAdmin = (user.username || '').toLowerCase() === ADMIN_TELEGRAM_USERNAME;
 
+  const existing = await env.DB.prepare('SELECT id, is_banned FROM users WHERE id = ?1')
+    .bind(String(user.id))
+    .first();
+
+  if (existing && existing.is_banned) {
+    return json(
+      { error: 'သင့်အကောင့်ကို ပိတ်ထားပါသည်။ Admin ကို ဆက်သွယ်ပါ။' },
+      403,
+      corsHeaders
+    );
+  }
+
+  // Signup Bonus: user အသစ်အတွက်သာ Admin သတ်မှတ်ထားတဲ့ bonus credits ကို ပေးမည်
+  let initialCredits;
+  if (!existing) {
+    const bonus = await getSetting(env, 'signup_bonus', '0');
+    initialCredits = parseInt(bonus, 10) || 0;
+  }
+
   await upsertUser(env, user.id, {
     name: user.first_name || user.username || 'User',
     username: user.username || null,
+    credits: existing ? undefined : initialCredits,
     isAdmin,
   });
 
@@ -197,10 +284,258 @@ async function handleAdminListUsers(request, env, corsHeaders) {
   }
 
   const { results } = await env.DB.prepare(
-    'SELECT id, name, username, credits, is_admin, updated_at FROM users ORDER BY updated_at DESC LIMIT 500'
+    'SELECT id, name, username, credits, is_admin, is_banned, updated_at FROM users ORDER BY updated_at DESC LIMIT 500'
   ).all();
 
   return json({ success: true, users: results }, 200, corsHeaders);
+}
+
+// ---- Admin: Ban / Unban ---------------------------------------------------
+
+async function handleAdminBanUser(request, env, corsHeaders) {
+  const body = await request.json();
+  const { token, userId, banned } = body;
+
+  if (!requireAdmin(env, token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  if (!userId) {
+    return json({ error: 'Missing userId' }, 400, corsHeaders);
+  }
+
+  await env.DB.prepare(
+    `UPDATE users SET is_banned = ?1, updated_at = datetime('now') WHERE id = ?2`
+  )
+    .bind(banned ? 1 : 0, String(userId))
+    .run();
+
+  return json({ success: true }, 200, corsHeaders);
+}
+
+// ---- Plans: Public ---------------------------------------------------------
+
+async function handlePlansList(request, env, corsHeaders) {
+  const { results } = await env.DB.prepare(
+    'SELECT id, name, price, credits, description FROM plans WHERE is_active = 1 ORDER BY credits ASC'
+  ).all();
+
+  return json({ success: true, plans: results }, 200, corsHeaders);
+}
+
+async function handlePaymentInfo(request, env, corsHeaders) {
+  const raw = await getSetting(env, 'payment_info', '{}');
+  let paymentInfo = {};
+  try {
+    paymentInfo = JSON.parse(raw);
+  } catch (e) {}
+
+  return json({ success: true, paymentInfo }, 200, corsHeaders);
+}
+
+// ---- Plans: Admin CRUD -------------------------------------------------
+
+async function handleAdminPlansList(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  if (!requireAdmin(env, body.token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+
+  const { results } = await env.DB.prepare('SELECT * FROM plans ORDER BY id ASC').all();
+  return json({ success: true, plans: results }, 200, corsHeaders);
+}
+
+async function handleAdminPlanCreate(request, env, corsHeaders) {
+  const body = await request.json();
+  if (!requireAdmin(env, body.token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+
+  const { name, price, credits, description } = body;
+  if (!name || !credits) {
+    return json({ error: 'Plan name and credits လိုအပ်ပါသည်' }, 400, corsHeaders);
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO plans (name, price, credits, description, is_active, updated_at)
+     VALUES (?1, ?2, ?3, ?4, 1, datetime('now'))`
+  )
+    .bind(name, price || '', Number(credits), description || '')
+    .run();
+
+  return json({ success: true }, 200, corsHeaders);
+}
+
+async function handleAdminPlanUpdate(request, env, corsHeaders) {
+  const body = await request.json();
+  if (!requireAdmin(env, body.token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+
+  const { id, name, price, credits, description, is_active } = body;
+  if (!id) {
+    return json({ error: 'Missing plan id' }, 400, corsHeaders);
+  }
+
+  await env.DB.prepare(
+    `UPDATE plans SET
+       name = COALESCE(?2, name),
+       price = COALESCE(?3, price),
+       credits = COALESCE(?4, credits),
+       description = COALESCE(?5, description),
+       is_active = COALESCE(?6, is_active),
+       updated_at = datetime('now')
+     WHERE id = ?1`
+  )
+    .bind(
+      id,
+      name ?? null,
+      price ?? null,
+      credits !== undefined ? Number(credits) : null,
+      description ?? null,
+      is_active !== undefined ? (is_active ? 1 : 0) : null
+    )
+    .run();
+
+  return json({ success: true }, 200, corsHeaders);
+}
+
+async function handleAdminPlanDelete(request, env, corsHeaders) {
+  const body = await request.json();
+  if (!requireAdmin(env, body.token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+
+  const { id } = body;
+  if (!id) {
+    return json({ error: 'Missing plan id' }, 400, corsHeaders);
+  }
+
+  await env.DB.prepare('DELETE FROM plans WHERE id = ?1').bind(id).run();
+  return json({ success: true }, 200, corsHeaders);
+}
+
+// ---- Settings: Signup Bonus + Payment Setup -----------------------------
+
+async function handleAdminSettingsGet(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  if (!requireAdmin(env, body.token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+
+  const signupBonus = await getSetting(env, 'signup_bonus', '0');
+  const rawPaymentInfo = await getSetting(env, 'payment_info', '{}');
+  let paymentInfo = {};
+  try {
+    paymentInfo = JSON.parse(rawPaymentInfo);
+  } catch (e) {}
+
+  return json(
+    { success: true, signupBonus: parseInt(signupBonus, 10) || 0, paymentInfo },
+    200,
+    corsHeaders
+  );
+}
+
+async function handleAdminSettingsUpdate(request, env, corsHeaders) {
+  const body = await request.json();
+  if (!requireAdmin(env, body.token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+
+  if (body.signupBonus !== undefined) {
+    await setSetting(env, 'signup_bonus', String(parseInt(body.signupBonus, 10) || 0));
+  }
+  if (body.paymentInfo !== undefined) {
+    await setSetting(env, 'payment_info', JSON.stringify(body.paymentInfo));
+  }
+
+  return json({ success: true }, 200, corsHeaders);
+}
+
+// ---- Purchases: Submit (User) + Approve/Reject (Admin) ----------------
+
+async function handlePurchaseSubmit(request, env, corsHeaders) {
+  const body = await request.json();
+  const { userId, planId, slipImageBase64 } = body;
+
+  if (!userId || !planId || !slipImageBase64) {
+    return json({ error: 'userId, planId, slip image လိုအပ်ပါသည်' }, 400, corsHeaders);
+  }
+
+  const plan = await env.DB.prepare('SELECT * FROM plans WHERE id = ?1 AND is_active = 1')
+    .bind(planId)
+    .first();
+  if (!plan) {
+    return json({ error: 'Plan not found' }, 404, corsHeaders);
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO purchases (user_id, plan_id, plan_name, credits, price, slip_image, status, updated_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', datetime('now'))`
+  )
+    .bind(String(userId), plan.id, plan.name, plan.credits, plan.price, slipImageBase64)
+    .run();
+
+  return json({ success: true }, 200, corsHeaders);
+}
+
+async function handleAdminPurchasesList(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  if (!requireAdmin(env, body.token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+
+  const status = body.status || 'pending';
+  const { results } = await env.DB.prepare(
+    'SELECT * FROM purchases WHERE status = ?1 ORDER BY created_at DESC LIMIT 100'
+  )
+    .bind(status)
+    .all();
+
+  return json({ success: true, purchases: results }, 200, corsHeaders);
+}
+
+async function handleAdminPurchaseReview(request, env, corsHeaders) {
+  const body = await request.json();
+  if (!requireAdmin(env, body.token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+
+  const { purchaseId, approve } = body;
+  if (!purchaseId) {
+    return json({ error: 'Missing purchaseId' }, 400, corsHeaders);
+  }
+
+  const purchase = await env.DB.prepare('SELECT * FROM purchases WHERE id = ?1')
+    .bind(purchaseId)
+    .first();
+  if (!purchase) {
+    return json({ error: 'Purchase not found' }, 404, corsHeaders);
+  }
+  if (purchase.status !== 'pending') {
+    return json({ error: 'ဒီ purchase ကို ပြန်စစ်ပြီးသားဖြစ်ပါသည်' }, 400, corsHeaders);
+  }
+
+  if (approve) {
+    await env.DB.prepare(
+      `UPDATE users SET credits = credits + ?1, updated_at = datetime('now') WHERE id = ?2`
+    )
+      .bind(purchase.credits, purchase.user_id)
+      .run();
+    await env.DB.prepare(
+      `UPDATE purchases SET status = 'approved', updated_at = datetime('now') WHERE id = ?1`
+    )
+      .bind(purchaseId)
+      .run();
+  } else {
+    await env.DB.prepare(
+      `UPDATE purchases SET status = 'rejected', updated_at = datetime('now') WHERE id = ?1`
+    )
+      .bind(purchaseId)
+      .run();
+  }
+
+  return json({ success: true }, 200, corsHeaders);
 }
 
 // Credits system: 1 character of TTS text = 1 credit.
@@ -515,81 +850,277 @@ function getAdminDashboardHtml() {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
       background-color: #f7f6f0;
       margin: 0;
-      padding: 24px;
+      padding: 20px;
     }
-    .header { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; }
-    .header h1 { font-size: 18px; letter-spacing: 1px; text-transform: uppercase; margin: 0; }
+    .header { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
+    .header h1 { font-size: 16px; letter-spacing: 1px; text-transform: uppercase; margin: 0; }
+    .tabs { display: flex; gap: 6px; margin-bottom: 20px; flex-wrap: wrap; }
+    .tab {
+      padding: 8px 14px; font-size: 12px; letter-spacing: 0.5px; text-transform: uppercase;
+      background: #fff; border: 1px solid #ddd; border-radius: 6px; cursor: pointer; color: #555;
+    }
+    .tab.active { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
+    .panel { display: none; }
+    .panel.active { display: block; }
     table {
-      width: 100%;
-      border-collapse: collapse;
-      background: #fff;
-      border-radius: 8px;
-      overflow: hidden;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+      width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px;
+      overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.05); margin-bottom: 20px;
     }
-    th, td { padding: 12px 16px; text-align: left; font-size: 13px; border-bottom: 1px solid #eee; }
-    th { background: #1a1a1a; color: #fff; text-transform: uppercase; letter-spacing: 1px; font-size: 11px; }
+    th, td { padding: 10px 12px; text-align: left; font-size: 12.5px; border-bottom: 1px solid #eee; vertical-align: top; }
+    th { background: #1a1a1a; color: #fff; text-transform: uppercase; letter-spacing: 1px; font-size: 10.5px; }
     .badge { background: #1a1a1a; color: #fff; font-size: 10px; padding: 2px 8px; border-radius: 10px; }
-    .error, .empty { color: #999; text-align: center; padding: 40px; }
+    .badge.banned { background: #d9534f; }
+    .error, .empty { color: #999; text-align: center; padding: 30px; }
+    .card { background: #fff; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); padding: 20px; margin-bottom: 20px; }
+    .card h3 { margin: 0 0 14px; font-size: 13px; text-transform: uppercase; letter-spacing: 1px; }
+    .field { margin-bottom: 12px; }
+    .field label { display: block; font-size: 11px; text-transform: uppercase; color: #888; margin-bottom: 4px; letter-spacing: 0.5px; }
+    .field input, .field textarea {
+      width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; box-sizing: border-box;
+    }
+    .field textarea { min-height: 60px; }
+    .row2 { display: flex; gap: 10px; }
+    .row2 > div { flex: 1; }
+    button.btn {
+      background: #1a1a1a; color: #fff; border: none; padding: 9px 16px; font-size: 12px;
+      letter-spacing: 0.5px; text-transform: uppercase; cursor: pointer; border-radius: 4px;
+    }
+    button.btn:hover { background: #333; }
+    button.btn.small { padding: 5px 10px; font-size: 11px; }
+    button.btn.danger { background: #d9534f; }
+    button.btn.danger:hover { background: #c9302c; }
+    button.btn.ghost { background: #fff; color: #1a1a1a; border: 1px solid #ccc; }
+    img.slip { max-width: 160px; border-radius: 4px; border: 1px solid #ddd; }
+    .msg { font-size: 12px; margin-top: 8px; }
+    .msg.ok { color: #4a5d4a; }
+    .msg.err { color: #d9534f; }
   </style>
 </head>
 <body>
   <div class="header">
-    <div style="font-size:24px;">🎙️</div>
+    <div style="font-size:22px;">🎙️</div>
     <h1>Ko Paing AI Voice Studio — Admin</h1>
   </div>
-  <div id="content">Loading…</div>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="users">Users</div>
+    <div class="tab" data-tab="plans">Plans</div>
+    <div class="tab" data-tab="settings">Settings</div>
+    <div class="tab" data-tab="purchases">Purchases</div>
+  </div>
+
+  <div class="panel active" id="panel-users"><div class="empty">Loading…</div></div>
+  <div class="panel" id="panel-plans"></div>
+  <div class="panel" id="panel-settings"></div>
+  <div class="panel" id="panel-purchases"><div class="empty">Loading…</div></div>
 
   <script>
+    const token = sessionStorage.getItem('admin_token');
+    if (!token) window.location.href = '/';
+
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById('panel-' + tab.dataset.tab).classList.add('active');
+        if (tab.dataset.tab === 'plans') loadPlans();
+        if (tab.dataset.tab === 'settings') loadSettings();
+        if (tab.dataset.tab === 'purchases') loadPurchases();
+      });
+    });
+
+    async function api(path, extra) {
+      const res = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, ...(extra || {}) })
+      });
+      const data = await res.json();
+      if (res.status === 401) window.location.href = '/';
+      return { ok: res.ok, data };
+    }
+
+    // ---------------- USERS ----------------
     async function loadUsers() {
-      const token = sessionStorage.getItem('admin_token');
-      if (!token) {
-        window.location.href = '/';
+      const wrap = document.getElementById('panel-users');
+      const { ok, data } = await api('/api/admin/users');
+      if (!ok || !data.success) {
+        wrap.innerHTML = '<div class="error">' + (data.error || 'Failed to load users') + '</div>';
+        return;
+      }
+      if (!data.users.length) {
+        wrap.innerHTML = '<div class="empty">No users yet.</div>';
+        return;
+      }
+      const rows = data.users.map(u => \`
+        <tr>
+          <td>\${u.id}</td>
+          <td>\${u.name || '-'}</td>
+          <td>\${u.username ? '@' + u.username : '-'}</td>
+          <td>\${u.credits ?? 0}</td>
+          <td>\${u.is_admin ? '<span class="badge">ADMIN</span>' : ''} \${u.is_banned ? '<span class="badge banned">BANNED</span>' : ''}</td>
+          <td><button class="btn small \${u.is_banned ? 'ghost' : 'danger'}" onclick="toggleBan('\${u.id}', \${u.is_banned ? 0 : 1})">\${u.is_banned ? 'Unban' : 'Ban'}</button></td>
+        </tr>
+      \`).join('');
+      wrap.innerHTML = \`<table><thead><tr><th>ID</th><th>Name</th><th>Username</th><th>Credits</th><th>Status</th><th>Action</th></tr></thead><tbody>\${rows}</tbody></table>\`;
+    }
+
+    async function toggleBan(userId, banned) {
+      const { ok, data } = await api('/api/admin/users/ban', { userId, banned: !!banned });
+      if (ok && data.success) loadUsers();
+      else alert(data.error || 'Failed');
+    }
+
+    // ---------------- PLANS ----------------
+    async function loadPlans() {
+      const wrap = document.getElementById('panel-plans');
+      wrap.innerHTML = '<div class="empty">Loading…</div>';
+      const { ok, data } = await api('/api/admin/plans/list');
+      if (!ok || !data.success) {
+        wrap.innerHTML = '<div class="error">' + (data.error || 'Failed to load plans') + '</div>';
         return;
       }
 
-      try {
-        const res = await fetch('/api/admin/users', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token })
-        });
-        const data = await res.json();
+      const rows = data.plans.map(p => \`
+        <tr>
+          <td>\${p.name}</td>
+          <td>\${p.price}</td>
+          <td>\${p.credits}</td>
+          <td>\${p.description || '-'}</td>
+          <td>\${p.is_active ? 'Active' : 'Hidden'}</td>
+          <td>
+            <button class="btn small ghost" onclick="toggleActive(\${p.id}, \${p.is_active ? 0 : 1})">\${p.is_active ? 'Hide' : 'Show'}</button>
+            <button class="btn small danger" onclick="deletePlan(\${p.id})">Delete</button>
+          </td>
+        </tr>
+      \`).join('');
 
-        if (!res.ok || !data.success) {
-          document.getElementById('content').innerHTML =
-            '<div class="error">' + (data.error || 'Failed to load users') + '</div>';
-          if (res.status === 401) window.location.href = '/';
-          return;
-        }
+      wrap.innerHTML = \`
+        <div class="card">
+          <h3>Add New Plan</h3>
+          <div class="row2">
+            <div class="field"><label>Name</label><input id="newPlanName" placeholder="e.g. Starter"></div>
+            <div class="field"><label>Price</label><input id="newPlanPrice" placeholder="e.g. 5000 MMK"></div>
+          </div>
+          <div class="row2">
+            <div class="field"><label>Credits</label><input id="newPlanCredits" type="number" placeholder="e.g. 5000"></div>
+          </div>
+          <div class="field"><label>Description</label><textarea id="newPlanDesc" placeholder="Optional description"></textarea></div>
+          <button class="btn" onclick="createPlan()">Add Plan</button>
+          <div class="msg" id="planMsg"></div>
+        </div>
+        <table><thead><tr><th>Name</th><th>Price</th><th>Credits</th><th>Description</th><th>Status</th><th>Action</th></tr></thead><tbody>\${rows || ''}</tbody></table>
+        \${!data.plans.length ? '<div class="empty">No plans yet — add one above.</div>' : ''}
+      \`;
+    }
 
-        if (!data.users.length) {
-          document.getElementById('content').innerHTML = '<div class="empty">No users yet.</div>';
-          return;
-        }
+    async function createPlan() {
+      const name = document.getElementById('newPlanName').value.trim();
+      const price = document.getElementById('newPlanPrice').value.trim();
+      const credits = document.getElementById('newPlanCredits').value.trim();
+      const description = document.getElementById('newPlanDesc').value.trim();
+      const msg = document.getElementById('planMsg');
+      if (!name || !credits) { msg.textContent = 'Name and Credits လိုအပ်ပါသည်'; msg.className = 'msg err'; return; }
 
-        const rows = data.users.map(u => \`
-          <tr>
-            <td>\${u.id}</td>
-            <td>\${u.name || '-'}</td>
-            <td>\${u.username ? '@' + u.username : '-'}</td>
-            <td>\${u.credits ?? 0}</td>
-            <td>\${u.is_admin ? '<span class="badge">ADMIN</span>' : ''}</td>
-            <td>\${u.updated_at || '-'}</td>
-          </tr>
-        \`).join('');
+      const { ok, data } = await api('/api/admin/plans/create', { name, price, credits, description });
+      if (ok && data.success) { msg.textContent = 'Added!'; msg.className = 'msg ok'; loadPlans(); }
+      else { msg.textContent = data.error || 'Failed'; msg.className = 'msg err'; }
+    }
 
-        document.getElementById('content').innerHTML = \`
-          <table>
-            <thead>
-              <tr><th>ID</th><th>Name</th><th>Username</th><th>Credits</th><th>Role</th><th>Updated</th></tr>
-            </thead>
-            <tbody>\${rows}</tbody>
-          </table>
-        \`;
-      } catch (err) {
-        document.getElementById('content').innerHTML = '<div class="error">Network error: ' + err.message + '</div>';
+    async function toggleActive(id, isActive) {
+      const { ok, data } = await api('/api/admin/plans/update', { id, is_active: !!isActive });
+      if (ok && data.success) loadPlans(); else alert(data.error || 'Failed');
+    }
+
+    async function deletePlan(id) {
+      if (!confirm('Delete this plan?')) return;
+      const { ok, data } = await api('/api/admin/plans/delete', { id });
+      if (ok && data.success) loadPlans(); else alert(data.error || 'Failed');
+    }
+
+    // ---------------- SETTINGS ----------------
+    async function loadSettings() {
+      const wrap = document.getElementById('panel-settings');
+      wrap.innerHTML = '<div class="empty">Loading…</div>';
+      const { ok, data } = await api('/api/admin/settings/get');
+      if (!ok || !data.success) {
+        wrap.innerHTML = '<div class="error">' + (data.error || 'Failed to load settings') + '</div>';
+        return;
       }
+      const p = data.paymentInfo || {};
+      wrap.innerHTML = \`
+        <div class="card">
+          <h3>Signup Bonus</h3>
+          <div class="field"><label>Bonus Credits (new user တစ်ယောက်ချင်းကို auto ပေးမည့် credits)</label>
+            <input id="signupBonus" type="number" value="\${data.signupBonus || 0}"></div>
+          <button class="btn" onclick="saveSignupBonus()">Save</button>
+          <div class="msg" id="bonusMsg"></div>
+        </div>
+        <div class="card">
+          <h3>Payment Setup</h3>
+          <div class="field"><label>Payment Method (e.g. KBZPay, Wave Pay)</label><input id="payMethod" value="\${p.method || ''}"></div>
+          <div class="row2">
+            <div class="field"><label>Account Name</label><input id="payName" value="\${p.account_name || ''}"></div>
+            <div class="field"><label>Account Number</label><input id="payNumber" value="\${p.account_number || ''}"></div>
+          </div>
+          <div class="field"><label>Note / Instructions</label><textarea id="payNote">\${p.note || ''}</textarea></div>
+          <button class="btn" onclick="savePaymentInfo()">Save</button>
+          <div class="msg" id="paymentMsg"></div>
+        </div>
+      \`;
+    }
+
+    async function saveSignupBonus() {
+      const signupBonus = document.getElementById('signupBonus').value;
+      const msg = document.getElementById('bonusMsg');
+      const { ok, data } = await api('/api/admin/settings/update', { signupBonus });
+      msg.textContent = ok && data.success ? 'Saved!' : (data.error || 'Failed');
+      msg.className = 'msg ' + (ok && data.success ? 'ok' : 'err');
+    }
+
+    async function savePaymentInfo() {
+      const paymentInfo = {
+        method: document.getElementById('payMethod').value.trim(),
+        account_name: document.getElementById('payName').value.trim(),
+        account_number: document.getElementById('payNumber').value.trim(),
+        note: document.getElementById('payNote').value.trim()
+      };
+      const msg = document.getElementById('paymentMsg');
+      const { ok, data } = await api('/api/admin/settings/update', { paymentInfo });
+      msg.textContent = ok && data.success ? 'Saved!' : (data.error || 'Failed');
+      msg.className = 'msg ' + (ok && data.success ? 'ok' : 'err');
+    }
+
+    // ---------------- PURCHASES ----------------
+    async function loadPurchases() {
+      const wrap = document.getElementById('panel-purchases');
+      wrap.innerHTML = '<div class="empty">Loading…</div>';
+      const { ok, data } = await api('/api/admin/purchases/list', { status: 'pending' });
+      if (!ok || !data.success) {
+        wrap.innerHTML = '<div class="error">' + (data.error || 'Failed to load purchases') + '</div>';
+        return;
+      }
+      if (!data.purchases.length) {
+        wrap.innerHTML = '<div class="empty">Pending purchase request မရှိပါ။</div>';
+        return;
+      }
+      wrap.innerHTML = data.purchases.map(p => \`
+        <div class="card">
+          <div><b>\${p.plan_name}</b> — \${p.credits} credits (\${p.price})</div>
+          <div style="font-size:12px;color:#888;margin:6px 0;">User ID: \${p.user_id} · \${p.created_at}</div>
+          <img class="slip" src="\${p.slip_image}" alt="Payment slip">
+          <div style="margin-top:12px;">
+            <button class="btn" onclick="reviewPurchase(\${p.id}, true)">Approve</button>
+            <button class="btn danger" onclick="reviewPurchase(\${p.id}, false)">Reject</button>
+          </div>
+        </div>
+      \`).join('');
+    }
+
+    async function reviewPurchase(purchaseId, approve) {
+      const { ok, data } = await api('/api/admin/purchases/review', { purchaseId, approve });
+      if (ok && data.success) loadPurchases(); else alert(data.error || 'Failed');
     }
 
     loadUsers();
@@ -781,6 +1312,7 @@ ${FAVICON}
         <div class="num" id="creditsNum">–</div>
         <div class="label">Credits</div>
       </div>
+      <a href="/plans" class="adminlink" style="display:inline-block;margin-top:8px;">🎫 Plans / Buy →</a>
       <div id="adminLinkWrap"></div>
     </div>
   </header>
@@ -1047,6 +1579,201 @@ ${FAVICON}
 })();
 </script>
 
+</body>
+</html>`;
+}
+
+// ===========================================================================
+// User-facing Plans Page (browse plans, buy with payment slip upload)
+// ===========================================================================
+
+function getPlansHtml() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Plans · Ko Paing AI Voice Studio</title>
+  ${FAVICON}
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background-color: #f7f6f0;
+      margin: 0;
+      padding: 20px;
+      max-width: 480px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    .top { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
+    .top h1 { font-size: 16px; margin: 0; letter-spacing: 0.5px; }
+    a.back { font-size: 12px; color: #666; text-decoration: none; }
+    .plan-card {
+      background: #fff; border-radius: 8px; padding: 18px; margin-bottom: 14px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.05); border: 1px solid #eee;
+    }
+    .plan-card h3 { margin: 0 0 6px; font-size: 16px; }
+    .plan-card .price { font-size: 20px; font-weight: 600; color: #b5482f; margin-bottom: 4px; }
+    .plan-card .credits { font-size: 12px; color: #7c8c7c; margin-bottom: 8px; }
+    .plan-card .desc { font-size: 13px; color: #666; margin-bottom: 12px; }
+    button.buy {
+      width: 100%; background: #1a1a1a; color: #fff; border: none; padding: 11px;
+      border-radius: 4px; font-size: 13px; letter-spacing: 0.5px; text-transform: uppercase; cursor: pointer;
+    }
+    .empty, .error { text-align: center; color: #999; padding: 40px 10px; }
+
+    .modal-bg {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 10;
+      align-items: center; justify-content: center; padding: 20px;
+    }
+    .modal-bg.show { display: flex; }
+    .modal {
+      background: #fff; border-radius: 8px; padding: 22px; max-width: 400px; width: 100%;
+    }
+    .modal h3 { margin: 0 0 10px; font-size: 15px; }
+    .payinfo { background: #f7f6f0; border-radius: 6px; padding: 12px; font-size: 13px; margin-bottom: 14px; line-height: 1.6; }
+    .payinfo .k { color: #888; font-size: 11px; text-transform: uppercase; }
+    .upload-box {
+      border: 1px dashed #ccc; border-radius: 6px; padding: 16px; text-align: center;
+      cursor: pointer; font-size: 12.5px; color: #888; margin-bottom: 14px;
+    }
+    .upload-box img { max-width: 100%; max-height: 160px; border-radius: 4px; margin-top: 8px; }
+    #slipInput { display: none; }
+    .modal-actions { display: flex; gap: 10px; }
+    .modal-actions button { flex: 1; padding: 10px; border-radius: 4px; border: none; font-size: 13px; cursor: pointer; }
+    .modal-actions .confirm { background: #1a1a1a; color: #fff; }
+    .modal-actions .cancel { background: #eee; color: #333; }
+    .msg { font-size: 12px; margin-top: 8px; text-align: center; }
+    .msg.ok { color: #4a5d4a; }
+    .msg.err { color: #d9534f; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <div style="font-size:20px;">🎫</div>
+    <h1>Plans / Buy Credits</h1>
+  </div>
+  <a href="/studio" class="back">← Back to Studio</a>
+  <div id="plansWrap" style="margin-top:16px;"><div class="empty">Loading…</div></div>
+
+  <div class="modal-bg" id="modalBg">
+    <div class="modal">
+      <h3 id="modalPlanName">Plan</h3>
+      <div class="payinfo" id="payInfoBox">Loading payment info…</div>
+      <div class="upload-box" id="uploadBox">
+        <div id="uploadLabel">📎 Payment slip ဓာတ်ပုံ တင်ပါ</div>
+        <img id="slipPreview" style="display:none;">
+      </div>
+      <input type="file" id="slipInput" accept="image/*">
+      <div class="modal-actions">
+        <button class="cancel" onclick="closeModal()">Cancel</button>
+        <button class="confirm" onclick="submitPurchase()">Submit</button>
+      </div>
+      <div class="msg" id="purchaseMsg"></div>
+    </div>
+  </div>
+
+  <script>
+    let tgUser = null;
+    try { tgUser = JSON.parse(sessionStorage.getItem('tg_user') || 'null'); } catch(e){}
+
+    let selectedPlan = null;
+    let slipBase64 = null;
+
+    async function loadPlans() {
+      const wrap = document.getElementById('plansWrap');
+      try {
+        const res = await fetch('/api/plans/list', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+        const data = await res.json();
+        if (!res.ok || !data.success || !data.plans.length) {
+          wrap.innerHTML = '<div class="empty">Plans မရှိသေးပါ။</div>';
+          return;
+        }
+        wrap.innerHTML = data.plans.map(p => \`
+          <div class="plan-card">
+            <h3>\${p.name}</h3>
+            <div class="price">\${p.price}</div>
+            <div class="credits">\${p.credits} credits</div>
+            \${p.description ? '<div class="desc">' + p.description + '</div>' : ''}
+            <button class="buy" onclick='openModal(\${JSON.stringify(p)})'>Buy Now</button>
+          </div>
+        \`).join('');
+      } catch (err) {
+        wrap.innerHTML = '<div class="error">Network error</div>';
+      }
+    }
+
+    async function openModal(plan) {
+      if (!tgUser || !tgUser.id) { alert('Telegram App ကနေ ပြန်ဝင်ပေးပါ။'); return; }
+      selectedPlan = plan;
+      slipBase64 = null;
+      document.getElementById('modalPlanName').textContent = plan.name + ' — ' + plan.price;
+      document.getElementById('slipPreview').style.display = 'none';
+      document.getElementById('uploadLabel').style.display = 'block';
+      document.getElementById('purchaseMsg').textContent = '';
+      document.getElementById('modalBg').classList.add('show');
+
+      try {
+        const res = await fetch('/api/payment/info', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+        const data = await res.json();
+        const p = data.paymentInfo || {};
+        document.getElementById('payInfoBox').innerHTML = p.method ? \`
+          <div><span class="k">Method:</span> \${p.method}</div>
+          <div><span class="k">Account Name:</span> \${p.account_name || '-'}</div>
+          <div><span class="k">Account Number:</span> \${p.account_number || '-'}</div>
+          \${p.note ? '<div style="margin-top:6px;">' + p.note + '</div>' : ''}
+        \` : 'Payment information မထည့်ရသေးပါ — Admin ကို ဆက်သွယ်ပါ။';
+      } catch(e) {
+        document.getElementById('payInfoBox').textContent = 'Payment info ရယူ၍ မရပါ။';
+      }
+    }
+
+    function closeModal() {
+      document.getElementById('modalBg').classList.remove('show');
+    }
+
+    document.getElementById('uploadBox').addEventListener('click', () => document.getElementById('slipInput').click());
+    document.getElementById('slipInput').addEventListener('change', e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        slipBase64 = reader.result;
+        const img = document.getElementById('slipPreview');
+        img.src = slipBase64;
+        img.style.display = 'block';
+        document.getElementById('uploadLabel').style.display = 'none';
+      };
+      reader.readAsDataURL(file);
+    });
+
+    async function submitPurchase() {
+      const msg = document.getElementById('purchaseMsg');
+      if (!slipBase64) { msg.textContent = 'Payment slip ဓာတ်ပုံ တင်ပါ'; msg.className = 'msg err'; return; }
+
+      try {
+        const res = await fetch('/api/purchase/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: tgUser.id, planId: selectedPlan.id, slipImageBase64: slipBase64 })
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          msg.textContent = 'တင်ပြီးပါပြီ — Admin approve လုပ်ပေးရုံ စောင့်ပါ။';
+          msg.className = 'msg ok';
+          setTimeout(closeModal, 1800);
+        } else {
+          msg.textContent = data.error || 'Failed';
+          msg.className = 'msg err';
+        }
+      } catch (err) {
+        msg.textContent = 'Network error';
+        msg.className = 'msg err';
+      }
+    }
+
+    loadPlans();
+  </script>
 </body>
 </html>`;
 }
