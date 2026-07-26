@@ -1451,18 +1451,35 @@ ${FAVICON}
   }
   footer a{ color:#b7b0a2; text-decoration:underline; }
   footer .powered{ margin-top:6px; }
+  .top-actions{
+    position:absolute; top:24px; right:24px; z-index:2;
+    display:flex; align-items:flex-end; flex-direction:column; gap:8px;
+  }
+  .top-actions .btn{
+    background:var(--ink); color:var(--paper); font-family:'IBM Plex Mono', monospace;
+    font-size:10.5px; letter-spacing:0.06em; text-transform:uppercase; text-decoration:none;
+    padding:8px 14px; border-radius:3px; display:inline-flex; align-items:center; gap:6px;
+    box-shadow:var(--shadow); transition:background .15s ease; white-space:nowrap;
+  }
+  .top-actions .btn:hover{ background:var(--wax); }
   @media (max-width:520px){
     .wrap{ padding:28px 16px 60px; }
     header{ flex-direction:column; }
     .row{ padding:18px 18px; }
     .output-foot{ flex-direction:column; align-items:stretch; }
     a.download{ justify-content:center; }
+    .top-actions{ position:static; flex-direction:row; justify-content:flex-end; margin-bottom:16px; }
   }
 </style>
 </head>
 <body>
 
 <div class="wrap">
+
+  <div class="top-actions">
+    <a href="/plans" class="btn">🎫 Plans / Buy</a>
+    <div id="adminLinkWrap"></div>
+  </div>
 
   <header>
     <div>
@@ -1475,8 +1492,6 @@ ${FAVICON}
         <div class="num" id="creditsNum">–</div>
         <div class="label">Credits</div>
       </div>
-      <a href="/plans" class="adminlink" style="display:inline-block;margin-top:8px;">🎫 Plans / Buy →</a>
-      <div id="adminLinkWrap"></div>
     </div>
   </header>
 
@@ -1573,7 +1588,7 @@ ${FAVICON}
   } else {
     whoLabelEl.textContent = 'Hi, ' + (tgUser.first_name || tgUser.username || 'there') + '!';
     if (tgUser.isAdmin) {
-      $('adminLinkWrap').innerHTML = '<a href="/admin" class="adminlink">🛠 Admin Panel →</a>';
+      $('adminLinkWrap').innerHTML = '<a href="/admin" class="btn">🛠 Admin Panel</a>';
     }
     loadCredits();
   }
