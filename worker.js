@@ -342,7 +342,7 @@ async function handleAdminBanUser(request, env, corsHeaders) {
 
 async function handlePlansList(request, env, corsHeaders) {
   const { results } = await env.DB.prepare(
-    'SELECT id, name, price, credits, bonus_credits, description FROM plans WHERE is_active = 1 ORDER BY credits ASC'
+    'SELECT id, name, price, price_th, credits, bonus_credits, description FROM plans WHERE is_active = 1 ORDER BY credits ASC'
   ).all();
 
   return json({ success: true, plans: results }, 200, corsHeaders);
@@ -379,16 +379,16 @@ async function handleAdminPlanCreate(request, env, corsHeaders) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
-  const { name, price, credits, bonusCredits, description } = body;
+  const { name, price, priceTh, credits, bonusCredits, description } = body;
   if (!name || !credits) {
     return json({ error: 'Plan name and credits လိုအပ်ပါသည်' }, 400, corsHeaders);
   }
 
   await env.DB.prepare(
-    `INSERT INTO plans (name, price, credits, bonus_credits, description, is_active, updated_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, 1, datetime('now'))`
+    `INSERT INTO plans (name, price, price_th, credits, bonus_credits, description, is_active, updated_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, datetime('now'))`
   )
-    .bind(name, price || '', Number(credits), Number(bonusCredits) || 0, description || '')
+    .bind(name, price || '', priceTh || '', Number(credits), Number(bonusCredits) || 0, description || '')
     .run();
 
   return json({ success: true }, 200, corsHeaders);
@@ -400,7 +400,7 @@ async function handleAdminPlanUpdate(request, env, corsHeaders) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
-  const { id, name, price, credits, bonusCredits, description, is_active } = body;
+  const { id, name, price, priceTh, credits, bonusCredits, description, is_active } = body;
   if (!id) {
     return json({ error: 'Missing plan id' }, 400, corsHeaders);
   }
@@ -409,10 +409,11 @@ async function handleAdminPlanUpdate(request, env, corsHeaders) {
     `UPDATE plans SET
        name = COALESCE(?2, name),
        price = COALESCE(?3, price),
-       credits = COALESCE(?4, credits),
-       bonus_credits = COALESCE(?5, bonus_credits),
-       description = COALESCE(?6, description),
-       is_active = COALESCE(?7, is_active),
+       price_th = COALESCE(?4, price_th),
+       credits = COALESCE(?5, credits),
+       bonus_credits = COALESCE(?6, bonus_credits),
+       description = COALESCE(?7, description),
+       is_active = COALESCE(?8, is_active),
        updated_at = datetime('now')
      WHERE id = ?1`
   )
@@ -420,6 +421,7 @@ async function handleAdminPlanUpdate(request, env, corsHeaders) {
       id,
       name ?? null,
       price ?? null,
+      priceTh ?? null,
       credits !== undefined ? Number(credits) : null,
       bonusCredits !== undefined ? Number(bonusCredits) : null,
       description ?? null,
@@ -1208,11 +1210,13 @@ function getAdminDashboardHtml() {
       const rows = data.plans.map(p => \`
         <tr>
           <td>\${p.name}</td>
-          <td>\${p.price}</td>
+          <td>\${p.price || '-'}</td>
+          <td>\${p.price_th || '-'}</td>
           <td>\${p.credits}</td>
           <td>\${p.description || '-'}</td>
           <td>\${p.is_active ? 'Active' : 'Hidden'}</td>
           <td>
+            <button class="btn small ghost" onclick="editPlanPrice(\${p.id}, \${JSON.stringify(p.price || '')}, \${JSON.stringify(p.price_th || '')})">Edit Price</button>
             <button class="btn small ghost" onclick="toggleActive(\${p.id}, \${p.is_active ? 0 : 1})">\${p.is_active ? 'Hide' : 'Show'}</button>
             <button class="btn small danger" onclick="deletePlan(\${p.id})">Delete</button>
           </td>
@@ -1224,16 +1228,17 @@ function getAdminDashboardHtml() {
           <h3>Add New Plan</h3>
           <div class="row2">
             <div class="field"><label>Name</label><input id="newPlanName" placeholder="e.g. Starter"></div>
-            <div class="field"><label>Price</label><input id="newPlanPrice" placeholder="e.g. 5000 MMK"></div>
+            <div class="field"><label>Credits</label><input id="newPlanCredits" type="number" placeholder="e.g. 5000"></div>
           </div>
           <div class="row2">
-            <div class="field"><label>Credits</label><input id="newPlanCredits" type="number" placeholder="e.g. 5000"></div>
+            <div class="field"><label>Price (Myanmar - MMK)</label><input id="newPlanPrice" placeholder="e.g. 5000 MMK"></div>
+            <div class="field"><label>Price (Thailand - THB)</label><input id="newPlanPriceTh" placeholder="e.g. 150 THB"></div>
           </div>
           <div class="field"><label>Description</label><textarea id="newPlanDesc" placeholder="Optional description"></textarea></div>
           <button class="btn" onclick="createPlan()">Add Plan</button>
           <div class="msg" id="planMsg"></div>
         </div>
-        <table><thead><tr><th>Name</th><th>Price</th><th>Credits</th><th>Description</th><th>Status</th><th>Action</th></tr></thead><tbody>\${rows || ''}</tbody></table>
+        <table><thead><tr><th>Name</th><th>Price (MMK)</th><th>Price (THB)</th><th>Credits</th><th>Description</th><th>Status</th><th>Action</th></tr></thead><tbody>\${rows || ''}</tbody></table>
         \${!data.plans.length ? '<div class="empty">No plans yet — add one above.</div>' : ''}
       \`;
     }
@@ -1241,14 +1246,24 @@ function getAdminDashboardHtml() {
     async function createPlan() {
       const name = document.getElementById('newPlanName').value.trim();
       const price = document.getElementById('newPlanPrice').value.trim();
+      const priceTh = document.getElementById('newPlanPriceTh').value.trim();
       const credits = document.getElementById('newPlanCredits').value.trim();
       const description = document.getElementById('newPlanDesc').value.trim();
       const msg = document.getElementById('planMsg');
       if (!name || !credits) { msg.textContent = 'Name and Credits လိုအပ်ပါသည်'; msg.className = 'msg err'; return; }
 
-      const { ok, data } = await api('/api/admin/plans/create', { name, price, credits, description });
+      const { ok, data } = await api('/api/admin/plans/create', { name, price, priceTh, credits, description });
       if (ok && data.success) { msg.textContent = 'Added!'; msg.className = 'msg ok'; loadPlans(); }
       else { msg.textContent = data.error || 'Failed'; msg.className = 'msg err'; }
+    }
+
+    async function editPlanPrice(id, currentPrice, currentPriceTh) {
+      const price = prompt('Price (Myanmar - MMK):', currentPrice || '');
+      if (price === null) return;
+      const priceTh = prompt('Price (Thailand - THB):', currentPriceTh || '');
+      if (priceTh === null) return;
+      const { ok, data } = await api('/api/admin/plans/update', { id, price, priceTh });
+      if (ok && data.success) loadPlans(); else alert(data.error || 'Failed');
     }
 
     async function toggleActive(id, isActive) {
@@ -2053,12 +2068,14 @@ function getPlansHtml() {
     let selectedPlan = null;
     let slipBase64 = null;
     let selectedCountry = 'MM';
+    let allPlans = [];
 
     function switchCountry(country) {
       selectedCountry = country;
       document.querySelectorAll('#countrySwitch .c-btn').forEach(b => {
         b.classList.toggle('active', b.dataset.country === country);
       });
+      renderPlans();
     }
 
     async function loadPlans() {
@@ -2070,25 +2087,32 @@ function getPlansHtml() {
           wrap.innerHTML = '<div class="empty">Plans မရှိသေးပါ။</div>';
           return;
         }
-        wrap.innerHTML = data.plans.map(p => \`
-          <div class="plan-card">
-            <h3>\${p.name}</h3>
-            <div class="price">\${p.price}</div>
-            <div class="credits">\${p.credits} credits</div>
-            \${p.description ? '<div class="desc">' + p.description + '</div>' : ''}
-            <button class="buy" onclick='openModal(\${JSON.stringify(p)})'>Buy Now</button>
-          </div>
-        \`).join('');
+        allPlans = data.plans;
+        renderPlans();
       } catch (err) {
         wrap.innerHTML = '<div class="error">Network error</div>';
       }
+    }
+
+    function renderPlans() {
+      const wrap = document.getElementById('plansWrap');
+      if (!allPlans.length) return;
+      wrap.innerHTML = allPlans.map(p => \`
+        <div class="plan-card">
+          <h3>\${p.name}</h3>
+          <div class="price">\${(selectedCountry === 'TH' ? p.price_th : p.price) || '-'}</div>
+          <div class="credits">\${p.credits} credits</div>
+          \${p.description ? '<div class="desc">' + p.description + '</div>' : ''}
+          <button class="buy" onclick='openModal(\${JSON.stringify(p)})'>Buy Now</button>
+        </div>
+      \`).join('');
     }
 
     async function openModal(plan) {
       if (!tgUser || !tgUser.id) { alert('Telegram App ကနေ ပြန်ဝင်ပေးပါ။'); return; }
       selectedPlan = plan;
       slipBase64 = null;
-      document.getElementById('modalPlanName').textContent = plan.name + ' — ' + plan.price;
+      document.getElementById('modalPlanName').textContent = plan.name + ' — ' + ((selectedCountry === 'TH' ? plan.price_th : plan.price) || '-');
       document.getElementById('slipPreview').style.display = 'none';
       document.getElementById('uploadLabel').style.display = 'block';
       document.getElementById('purchaseMsg').textContent = '';
