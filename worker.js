@@ -638,7 +638,7 @@ async function handleAdminPurchaseReview(request, env, corsHeaders) {
 
 async function handleGenerateStart(request, env, corsHeaders) {
   const body = await request.json();
-  const { userId, text, refAudioBase64, promptText, speed, style, voiceType } = body;
+  const { userId, text, refAudioBase64, promptText, controlInstruction, style, voiceType } = body;
 
   if (!userId) {
     return json({ error: 'Missing userId' }, 400, corsHeaders);
@@ -670,11 +670,10 @@ async function handleGenerateStart(request, env, corsHeaders) {
     input.reference_audio_base64 = refAudioBase64;
     if (promptText && promptText.trim()) input.prompt_text = promptText.trim();
   }
-  // Speech Speed (0.5x - 1.5x), Speaking Style (Normal/Happy/News/Audio Book etc.),
-  // Voice Type (Female/Male/Multi voice) - Studio UI ကနေ ရွေးလိုက်တဲ့ options
-  const speedNum = Number(speed);
-  if (!isNaN(speedNum) && speedNum > 0) {
-    input.speed = Math.min(Math.max(speedNum, 0.5), 1.5);
+  // Speech Pace (Slow/Fast) - VoxCPM2 ရဲ့ Control Instruction (natural language) field ကနေတဆင့်
+  // ပို့ပေးသည် (numeric speed parameter ကို VoxCPM2 က support မလုပ်ပါ)
+  if (controlInstruction && controlInstruction.trim()) {
+    input.control_instruction = controlInstruction.trim();
   }
   if (style) input.style = style;
   if (voiceType) input.voice_type = voiceType;
@@ -1444,8 +1443,6 @@ ${FAVICON}
     outline:none; transition:border-color .15s ease;
   }
   select:focus{ border-color:var(--moss); }
-  input[type="range"]{ width:100%; accent-color:var(--moss); margin-top:8px; }
-  .speedlabel{ color:var(--moss); font-weight:600; }
   .optionrow{ display:flex; gap:24px; flex-wrap:wrap; }
   .optionrow > div{ flex:1; min-width:150px; }
   .charcount{ text-align:right; font-family:'IBM Plex Mono', monospace; font-size:11px; color:#a39c8c; margin-top:6px; }
@@ -1588,8 +1585,12 @@ ${FAVICON}
     </div>
 
     <div class="row">
-      <label for="speedRange">Speech Speed <span class="speedlabel" id="speedVal">1.00x</span></label>
-      <input type="range" id="speedRange" min="0.5" max="1.5" step="0.05" value="1">
+      <label for="paceSelect">Speech Pace</label>
+      <select id="paceSelect">
+        <option value="normal">Normal</option>
+        <option value="slow">Slow</option>
+        <option value="fast">Fast</option>
+      </select>
     </div>
 
     <div class="row optionrow">
@@ -1673,8 +1674,7 @@ ${FAVICON}
   const downloadLink   = $('downloadLink');
   const sendTelegramBtn = $('sendTelegramBtn');
 
-  const speedRange    = $('speedRange');
-  const speedVal      = $('speedVal');
+  const paceSelect    = $('paceSelect');
   const styleSelect   = $('styleSelect');
   const voiceTypeSelect = $('voiceTypeSelect');
 
@@ -1685,10 +1685,6 @@ ${FAVICON}
   let lastAudioBase64 = null;
   let lastAudioFormat = null;
   const tgWebApp = window.Telegram && window.Telegram.WebApp;
-
-  speedRange.addEventListener('input', () => {
-    speedVal.textContent = parseFloat(speedRange.value).toFixed(2) + 'x';
-  });
 
   if (!tgUser || !tgUser.id) {
     statusLine.textContent = 'Telegram App ကနေ ပြန်ဝင်ပေးပါ။';
@@ -1797,6 +1793,12 @@ ${FAVICON}
     setBusy(true);
     setStatus('Sending request…');
 
+    const paceInstructions = {
+      slow: 'Speaks slowly.',
+      fast: 'Speaks quickly, at a fast pace.'
+    };
+    const controlInstruction = paceInstructions[paceSelect.value] || undefined;
+
     try {
       const startRes = await fetch('/api/generate', {
         method:'POST',
@@ -1806,7 +1808,7 @@ ${FAVICON}
           text,
           refAudioBase64: refAudioBase64 || undefined,
           promptText: promptTextEl.value.trim() || undefined,
-          speed: parseFloat(speedRange.value),
+          controlInstruction,
           style: styleSelect.value,
           voiceType: voiceTypeSelect.value
         })
@@ -2187,38 +2189,38 @@ function getPrivacyHtml() {
   <a href="/studio" class="back">← Back to Studio</a>
 
   <div class="card" style="margin-top:16px;">
-    <h2>ကျွန်ုပ်တို့ စုဆောင်းသော အချက်အလက်များ</h2>
+    <h2>Information We Collect</h2>
     <ul>
-      <li>Telegram User ID၊ Username နှင့် အမည် (login အတွက်)</li>
-      <li>Voice generate လုပ်ရန် သင်ထည့်ဝင်သော စာသား (text)</li>
-      <li>Voice cloning အတွက် သင် upload လုပ်သော reference audio file</li>
-      <li>Credit ဝယ်ယူမှုအတွက် တင်ပြသော payment slip ပုံများ</li>
+      <li>Telegram User ID, username, and name (for login)</li>
+      <li>The text you enter to generate voice output</li>
+      <li>The reference audio file you upload for voice cloning</li>
+      <li>Payment slip images submitted for credit purchases</li>
     </ul>
   </div>
 
   <div class="card">
-    <h2>အသုံးပြုပုံ</h2>
-    <p>ဤအချက်အလက်များကို Voice Studio service ပေးခြင်း၊ Credit စီမံခန့်ခွဲခြင်းနှင့် Payment approve လုပ်ခြင်းအတွက်သာ အသုံးပြုပါသည်။ တတိယပါတီများထံ ရောင်းချခြင်း (သို့) မျှဝေခြင်း မပြုပါ။</p>
+    <h2>How We Use It</h2>
+    <p>This information is used only to provide the Voice Studio service, manage credits, and approve payments. We do not sell or share it with third parties.</p>
   </div>
 
   <div class="notice">
-    <strong>⚠️ Voice Cloning သတိပေးချက်</strong>
-    <p style="margin-top:8px;">အခြားသူတစ်ဦးဦး၏ အသံကို ၎င်းတို့ ခွင့်ပြုချက်မရှိဘဲ Clone လုပ်ခြင်း၊ အသုံးပြုခြင်း (Unauthorized Voice Cloning) ကို ဤ Studio တွင် လုံးဝ တားမြစ်ပါသည်။ Reference Audio ကို upload လုပ်ခြင်းဖြင့် ၎င်းအသံပိုင်ရှင်၏ ခွင့်ပြုချက်ရရှိပြီးဖြစ်ကြောင်း သင်အနေဖြင့် အာမခံရာရောက်ပါသည်။ ချိုးဖောက်ကျင့်သုံးမှု တွေ့ရှိပါက Account ကို ကြိုတင်အသိပေးချက်မပါဘဲ ရပ်ဆိုင်း (Ban) ပြုလုပ်နိုင်ပါသည်။</p>
+    <strong>⚠️ Voice Cloning Notice</strong>
+    <p style="margin-top:8px;">Cloning or using someone else's voice without their consent (unauthorized voice cloning) is strictly prohibited on this Studio. By uploading a reference audio file, you confirm that you have obtained permission from the owner of that voice. Violations may result in the account being suspended (banned) without prior notice.</p>
   </div>
 
   <div class="card">
-    <h2>AI Model အသုံးပြုမှု</h2>
-    <p>ဤ Voice Studio သည် Voice Cloning နှင့် Text-to-Speech generation အတွက် <strong>VOXCPM2</strong> AI Model ကို အသုံးပြုထားပါသည်။</p>
+    <h2>AI Model Usage</h2>
+    <p>This Voice Studio uses the <strong>VOXCPM2</strong> AI model for voice cloning and text-to-speech generation.</p>
   </div>
 
   <div class="card">
-    <h2>Data သိမ်းဆည်းမှု</h2>
-    <p>Generate လုပ်ထားသော Audio output များကို Download ရယူနိုင်ရန်အတွက် ခေတ္တခဏသာ (ယာယီ) သိမ်းဆည်းပေးထားပြီး၊ အချိန်အကန့်အသတ်ကျော်လွန်ပါက အလိုအလျောက် ဖျက်သိမ်းသွားပါမည်။</p>
+    <h2>Data Retention</h2>
+    <p>Generated audio output is stored temporarily so it can be downloaded, and is automatically deleted after a set period.</p>
   </div>
 
   <div class="card">
-    <h2>ဆက်သွယ်ရန်</h2>
-    <p>ဤ Policy နှင့် ပတ်သက်၍ မေးမြန်းလိုပါက Admin - <strong>@${ADMIN_TELEGRAM_USERNAME}</strong> ထံ ဆက်သွယ်နိုင်ပါသည်။</p>
+    <h2>Contact</h2>
+    <p>If you have any questions about this Policy, you can contact the Admin - <strong>@${ADMIN_TELEGRAM_USERNAME}</strong>.</p>
   </div>
 
   <footer>Power By Ko Paing · AI Voice Studio</footer>
