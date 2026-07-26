@@ -37,6 +37,9 @@ export default {
       if (url.pathname === '/plans') {
         return html(getPlansHtml());
       }
+      if (url.pathname === '/privacy') {
+        return html(getPrivacyHtml());
+      }
 
       // ---- API ---------------------------------------------------------
       if (url.pathname === '/api/auth/telegram' && request.method === 'POST') {
@@ -65,11 +68,17 @@ export default {
       if (url.pathname === '/api/plans/list' && request.method === 'POST') {
         return await handlePlansList(request, env, corsHeaders);
       }
-      if (url.pathname === '/api/payment/info' && request.method === 'POST') {
-        return await handlePaymentInfo(request, env, corsHeaders);
+      if (url.pathname === '/api/payment-methods/list' && request.method === 'POST') {
+        return await handlePaymentMethodsList(request, env, corsHeaders);
       }
       if (url.pathname === '/api/purchase/submit' && request.method === 'POST') {
         return await handlePurchaseSubmit(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/generate/save-audio' && request.method === 'POST') {
+        return await handleSaveAudio(request, env, corsHeaders);
+      }
+      if (url.pathname.startsWith('/api/audio/') && request.method === 'GET') {
+        return await handleAudioDownload(url.pathname.split('/').pop(), env, corsHeaders);
       }
 
       // ---- Admin: Plans --------------------------------------------------
@@ -84,6 +93,20 @@ export default {
       }
       if (url.pathname === '/api/admin/plans/delete' && request.method === 'POST') {
         return await handleAdminPlanDelete(request, env, corsHeaders);
+      }
+
+      // ---- Admin: Payment Methods -----------------------------------------
+      if (url.pathname === '/api/admin/payment-methods/list' && request.method === 'POST') {
+        return await handleAdminPaymentMethodsList(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/admin/payment-methods/create' && request.method === 'POST') {
+        return await handleAdminPaymentMethodCreate(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/admin/payment-methods/update' && request.method === 'POST') {
+        return await handleAdminPaymentMethodUpdate(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/admin/payment-methods/delete' && request.method === 'POST') {
+        return await handleAdminPaymentMethodDelete(request, env, corsHeaders);
       }
 
       // ---- Admin: Settings (Signup Bonus + Payment Setup) ----------------
@@ -316,20 +339,18 @@ async function handleAdminBanUser(request, env, corsHeaders) {
 
 async function handlePlansList(request, env, corsHeaders) {
   const { results } = await env.DB.prepare(
-    'SELECT id, name, price, credits, description FROM plans WHERE is_active = 1 ORDER BY credits ASC'
+    'SELECT id, name, price, credits, bonus_credits, description FROM plans WHERE is_active = 1 ORDER BY credits ASC'
   ).all();
 
   return json({ success: true, plans: results }, 200, corsHeaders);
 }
 
-async function handlePaymentInfo(request, env, corsHeaders) {
-  const raw = await getSetting(env, 'payment_info', '{}');
-  let paymentInfo = {};
-  try {
-    paymentInfo = JSON.parse(raw);
-  } catch (e) {}
+async function handlePaymentMethodsList(request, env, corsHeaders) {
+  const { results } = await env.DB.prepare(
+    'SELECT id, method, account_name, account_number, note FROM payment_methods WHERE is_active = 1 ORDER BY id ASC'
+  ).all();
 
-  return json({ success: true, paymentInfo }, 200, corsHeaders);
+  return json({ success: true, methods: results }, 200, corsHeaders);
 }
 
 // ---- Plans: Admin CRUD -------------------------------------------------
@@ -350,16 +371,16 @@ async function handleAdminPlanCreate(request, env, corsHeaders) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
-  const { name, price, credits, description } = body;
+  const { name, price, credits, bonusCredits, description } = body;
   if (!name || !credits) {
     return json({ error: 'Plan name and credits လိုအပ်ပါသည်' }, 400, corsHeaders);
   }
 
   await env.DB.prepare(
-    `INSERT INTO plans (name, price, credits, description, is_active, updated_at)
-     VALUES (?1, ?2, ?3, ?4, 1, datetime('now'))`
+    `INSERT INTO plans (name, price, credits, bonus_credits, description, is_active, updated_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, 1, datetime('now'))`
   )
-    .bind(name, price || '', Number(credits), description || '')
+    .bind(name, price || '', Number(credits), Number(bonusCredits) || 0, description || '')
     .run();
 
   return json({ success: true }, 200, corsHeaders);
@@ -371,7 +392,7 @@ async function handleAdminPlanUpdate(request, env, corsHeaders) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
-  const { id, name, price, credits, description, is_active } = body;
+  const { id, name, price, credits, bonusCredits, description, is_active } = body;
   if (!id) {
     return json({ error: 'Missing plan id' }, 400, corsHeaders);
   }
@@ -381,8 +402,9 @@ async function handleAdminPlanUpdate(request, env, corsHeaders) {
        name = COALESCE(?2, name),
        price = COALESCE(?3, price),
        credits = COALESCE(?4, credits),
-       description = COALESCE(?5, description),
-       is_active = COALESCE(?6, is_active),
+       bonus_credits = COALESCE(?5, bonus_credits),
+       description = COALESCE(?6, description),
+       is_active = COALESCE(?7, is_active),
        updated_at = datetime('now')
      WHERE id = ?1`
   )
@@ -391,6 +413,7 @@ async function handleAdminPlanUpdate(request, env, corsHeaders) {
       name ?? null,
       price ?? null,
       credits !== undefined ? Number(credits) : null,
+      bonusCredits !== undefined ? Number(bonusCredits) : null,
       description ?? null,
       is_active !== undefined ? (is_active ? 1 : 0) : null
     )
@@ -423,17 +446,7 @@ async function handleAdminSettingsGet(request, env, corsHeaders) {
   }
 
   const signupBonus = await getSetting(env, 'signup_bonus', '0');
-  const rawPaymentInfo = await getSetting(env, 'payment_info', '{}');
-  let paymentInfo = {};
-  try {
-    paymentInfo = JSON.parse(rawPaymentInfo);
-  } catch (e) {}
-
-  return json(
-    { success: true, signupBonus: parseInt(signupBonus, 10) || 0, paymentInfo },
-    200,
-    corsHeaders
-  );
+  return json({ success: true, signupBonus: parseInt(signupBonus, 10) || 0 }, 200, corsHeaders);
 }
 
 async function handleAdminSettingsUpdate(request, env, corsHeaders) {
@@ -445,10 +458,89 @@ async function handleAdminSettingsUpdate(request, env, corsHeaders) {
   if (body.signupBonus !== undefined) {
     await setSetting(env, 'signup_bonus', String(parseInt(body.signupBonus, 10) || 0));
   }
-  if (body.paymentInfo !== undefined) {
-    await setSetting(env, 'payment_info', JSON.stringify(body.paymentInfo));
+
+  return json({ success: true }, 200, corsHeaders);
+}
+
+// ---- Payment Methods: Admin CRUD -----------------------------------------
+
+async function handleAdminPaymentMethodsList(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  if (!requireAdmin(env, body.token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
+  const { results } = await env.DB.prepare('SELECT * FROM payment_methods ORDER BY id ASC').all();
+  return json({ success: true, methods: results }, 200, corsHeaders);
+}
+
+async function handleAdminPaymentMethodCreate(request, env, corsHeaders) {
+  const body = await request.json();
+  if (!requireAdmin(env, body.token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+
+  const { method, accountName, accountNumber, note } = body;
+  if (!method) {
+    return json({ error: 'Payment method name လိုအပ်ပါသည်' }, 400, corsHeaders);
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO payment_methods (method, account_name, account_number, note, is_active, updated_at)
+     VALUES (?1, ?2, ?3, ?4, 1, datetime('now'))`
+  )
+    .bind(method, accountName || '', accountNumber || '', note || '')
+    .run();
+
+  return json({ success: true }, 200, corsHeaders);
+}
+
+async function handleAdminPaymentMethodUpdate(request, env, corsHeaders) {
+  const body = await request.json();
+  if (!requireAdmin(env, body.token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+
+  const { id, method, accountName, accountNumber, note, is_active } = body;
+  if (!id) {
+    return json({ error: 'Missing payment method id' }, 400, corsHeaders);
+  }
+
+  await env.DB.prepare(
+    `UPDATE payment_methods SET
+       method = COALESCE(?2, method),
+       account_name = COALESCE(?3, account_name),
+       account_number = COALESCE(?4, account_number),
+       note = COALESCE(?5, note),
+       is_active = COALESCE(?6, is_active),
+       updated_at = datetime('now')
+     WHERE id = ?1`
+  )
+    .bind(
+      id,
+      method ?? null,
+      accountName ?? null,
+      accountNumber ?? null,
+      note ?? null,
+      is_active !== undefined ? (is_active ? 1 : 0) : null
+    )
+    .run();
+
+  return json({ success: true }, 200, corsHeaders);
+}
+
+async function handleAdminPaymentMethodDelete(request, env, corsHeaders) {
+  const body = await request.json();
+  if (!requireAdmin(env, body.token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+
+  const { id } = body;
+  if (!id) {
+    return json({ error: 'Missing payment method id' }, 400, corsHeaders);
+  }
+
+  await env.DB.prepare('DELETE FROM payment_methods WHERE id = ?1').bind(id).run();
   return json({ success: true }, 200, corsHeaders);
 }
 
@@ -630,6 +722,75 @@ async function handleGenerateStatus(request, env, corsHeaders) {
   }
 
   return json(data, 200, corsHeaders);
+}
+
+// ===========================================================================
+// Audio save/download (Telegram Mini App in-app browser ကနေ တိုက်ရိုက် download
+// ဆွဲမရတဲ့ ပြဿနာအတွက် - audio ကို ခဏသိမ်းပြီး real https URL တစ်ခုအနေနဲ့ ပြန်ပေးသည်။
+// ဒီ URL ကို Chrome (system browser) မှာ ဖွင့်လိုက်ရင် Content-Disposition header
+// ကြောင့် တိုက်ရိုက် download ချနိုင်ပါသည်)
+// ===========================================================================
+
+async function handleSaveAudio(request, env, corsHeaders) {
+  const body = await request.json();
+  const { userId, audioBase64, format } = body;
+
+  if (!audioBase64) {
+    return json({ error: 'Missing audioBase64' }, 400, corsHeaders);
+  }
+
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS audio_files (
+      id TEXT PRIMARY KEY,
+      user_id TEXT,
+      format TEXT,
+      data TEXT,
+      created_at TEXT
+    )`
+  ).run();
+
+  const id = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO audio_files (id, user_id, format, data, created_at) VALUES (?1, ?2, ?3, ?4, datetime('now'))`
+  )
+    .bind(id, userId ? String(userId) : null, format || 'wav', audioBase64)
+    .run();
+
+  // 1 ရက်ထက် ကြာသွားတဲ့ အဟောင်း audio များကို ရှင်းလင်းပါ (best-effort)
+  try {
+    await env.DB.prepare(`DELETE FROM audio_files WHERE created_at < datetime('now', '-1 day')`).run();
+  } catch (e) {
+    // ignore cleanup errors
+  }
+
+  return json({ success: true, audioId: id, url: `/api/audio/${id}` }, 200, corsHeaders);
+}
+
+async function handleAudioDownload(id, env, corsHeaders) {
+  if (!id) {
+    return json({ error: 'Missing audio id' }, 400, corsHeaders);
+  }
+
+  const row = await env.DB.prepare('SELECT format, data FROM audio_files WHERE id = ?1').bind(id).first();
+  if (!row) {
+    return json({ error: 'Audio ရှာမတွေ့ပါ သို့မဟုတ် သက်တမ်းကုန်သွားပါပြီ' }, 404, corsHeaders);
+  }
+
+  const format = row.format || 'wav';
+  const mime = format === 'mp3' ? 'audio/mpeg' : `audio/${format}`;
+
+  const binary = atob(row.data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+  return new Response(bytes, {
+    status: 200,
+    headers: {
+      'Content-Type': mime,
+      'Content-Disposition': `attachment; filename="voice-output.${format}"`,
+      'Access-Control-Allow-Origin': '*',
+    },
+  });
 }
 
 async function verifyTelegramAuth(initData, botToken) {
@@ -1288,6 +1449,8 @@ ${FAVICON}
     text-align:center; margin-top:48px; font-family:'IBM Plex Mono', monospace;
     font-size:11px; color:#b7b0a2; letter-spacing:0.04em;
   }
+  footer a{ color:#b7b0a2; text-decoration:underline; }
+  footer .powered{ margin-top:6px; }
   @media (max-width:520px){
     .wrap{ padding:28px 16px 60px; }
     header{ flex-direction:column; }
@@ -1360,7 +1523,10 @@ ${FAVICON}
     </div>
   </div>
 
-  <footer>Ko Paing · AI Voice Studio</footer>
+  <footer>
+    AI Voice Studio
+    <div class="powered">Power By Ko Paing · <a href="/privacy">Privacy Policy</a></div>
+  </footer>
 </div>
 
 <script>
@@ -1397,6 +1563,8 @@ ${FAVICON}
   let refAudioBase64 = null;
   let currentCredits = 0;
   let polling = false;
+  let savedAudioUrl = null;
+  const tgWebApp = window.Telegram && window.Telegram.WebApp;
 
   if (!tgUser || !tgUser.id) {
     statusLine.textContent = 'Telegram App ကနေ ပြန်ဝင်ပေးပါ။';
@@ -1468,6 +1636,17 @@ ${FAVICON}
     dropzone.classList.remove('has-file');
     promptLine.style.display = 'none';
     promptTextEl.value = '';
+  });
+
+  // Telegram Mini App ရဲ့ in-app browser ကနေ audio ကို တိုက်ရိုက် download ဆွဲမရတဲ့
+  // ပြဿနာအတွက် - saved audio ရဲ့ real https URL ကို Chrome (system browser) မှာ
+  // ဖွင့်ပေးပြီး အဲ့ဒီကနေ direct download ချနိုင်အောင် လုပ်ပေးသည်
+  downloadLink.addEventListener('click', e => {
+    if (tgWebApp && savedAudioUrl) {
+      e.preventDefault();
+      tgWebApp.openLink(savedAudioUrl);
+    }
+    // Telegram မဟုတ်ရင် (သို့) savedAudioUrl မရသေးရင် anchor ရဲ့ default download အတိုင်း လုပ်ပါစေ
   });
 
   function setStatus(msg, kind){
@@ -1572,6 +1751,25 @@ ${FAVICON}
     downloadLink.href = src;
     downloadLink.download = 'voice-output.' + fmt;
     outputMeta.textContent = out.sample_rate ? (out.sample_rate + ' Hz · ' + fmt.toUpperCase()) : fmt.toUpperCase();
+
+    savedAudioUrl = null;
+    fetch('/api/generate/save-audio', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: tgUser ? tgUser.id : undefined,
+        audioBase64: out.audio_base64,
+        format: fmt
+      })
+    })
+      .then(res => res.json())
+      .then(data => {
+        if (data && data.success && data.url) {
+          savedAudioUrl = location.origin + data.url;
+          downloadLink.href = savedAudioUrl;
+        }
+      })
+      .catch(() => {});
 
     output.classList.add('show');
     output.scrollIntoView({ behavior:'smooth', block:'nearest' });
@@ -1774,6 +1972,95 @@ function getPlansHtml() {
 
     loadPlans();
   </script>
+</body>
+</html>`;
+}
+
+// ===========================================================================
+// Privacy Policy Page
+// ===========================================================================
+
+function getPrivacyHtml() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privacy Policy · Ko Paing AI Voice Studio</title>
+  ${FAVICON}
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background-color: #f7f6f0;
+      margin: 0;
+      padding: 20px;
+      max-width: 560px;
+      margin-left: auto;
+      margin-right: auto;
+      color: #1c1b19;
+      line-height: 1.6;
+    }
+    .top { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
+    .top h1 { font-size: 18px; margin: 0; letter-spacing: 0.3px; }
+    a.back { font-size: 12px; color: #666; text-decoration: none; }
+    .card {
+      background: #fff; border-radius: 8px; padding: 20px 22px; margin-bottom: 14px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.05); border: 1px solid #eee;
+    }
+    .card h2 { font-size: 15px; margin: 0 0 8px; color: #b5482f; }
+    .card p, .card li { font-size: 13.5px; color: #444; margin: 0 0 6px; }
+    .card ul { padding-left: 18px; margin: 6px 0; }
+    .notice {
+      background: #fff8f6; border: 1px solid #f0d8d1; border-radius: 8px;
+      padding: 16px 18px; font-size: 13.5px; color: #7a3324; margin-bottom: 14px;
+    }
+    .notice strong { color: #b5482f; }
+    footer { text-align: center; margin-top: 30px; font-size: 11.5px; color: #a39c8c; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <div style="font-size:20px;">🔒</div>
+    <h1>Privacy Policy</h1>
+  </div>
+  <a href="/studio" class="back">← Back to Studio</a>
+
+  <div class="card" style="margin-top:16px;">
+    <h2>ကျွန်ုပ်တို့ စုဆောင်းသော အချက်အလက်များ</h2>
+    <ul>
+      <li>Telegram User ID၊ Username နှင့် အမည် (login အတွက်)</li>
+      <li>Voice generate လုပ်ရန် သင်ထည့်ဝင်သော စာသား (text)</li>
+      <li>Voice cloning အတွက် သင် upload လုပ်သော reference audio file</li>
+      <li>Credit ဝယ်ယူမှုအတွက် တင်ပြသော payment slip ပုံများ</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>အသုံးပြုပုံ</h2>
+    <p>ဤအချက်အလက်များကို Voice Studio service ပေးခြင်း၊ Credit စီမံခန့်ခွဲခြင်းနှင့် Payment approve လုပ်ခြင်းအတွက်သာ အသုံးပြုပါသည်။ တတိယပါတီများထံ ရောင်းချခြင်း (သို့) မျှဝေခြင်း မပြုပါ။</p>
+  </div>
+
+  <div class="notice">
+    <strong>⚠️ Voice Cloning သတိပေးချက်</strong>
+    <p style="margin-top:8px;">အခြားသူတစ်ဦးဦး၏ အသံကို ၎င်းတို့ ခွင့်ပြုချက်မရှိဘဲ Clone လုပ်ခြင်း၊ အသုံးပြုခြင်း (Unauthorized Voice Cloning) ကို ဤ Studio တွင် လုံးဝ တားမြစ်ပါသည်။ Reference Audio ကို upload လုပ်ခြင်းဖြင့် ၎င်းအသံပိုင်ရှင်၏ ခွင့်ပြုချက်ရရှိပြီးဖြစ်ကြောင်း သင်အနေဖြင့် အာမခံရာရောက်ပါသည်။ ချိုးဖောက်ကျင့်သုံးမှု တွေ့ရှိပါက Account ကို ကြိုတင်အသိပေးချက်မပါဘဲ ရပ်ဆိုင်း (Ban) ပြုလုပ်နိုင်ပါသည်။</p>
+  </div>
+
+  <div class="card">
+    <h2>AI Model အသုံးပြုမှု</h2>
+    <p>ဤ Voice Studio သည် Voice Cloning နှင့် Text-to-Speech generation အတွက် <strong>VOXCPM2</strong> AI Model ကို အသုံးပြုထားပါသည်။</p>
+  </div>
+
+  <div class="card">
+    <h2>Data သိမ်းဆည်းမှု</h2>
+    <p>Generate လုပ်ထားသော Audio output များကို Download ရယူနိုင်ရန်အတွက် ခေတ္တခဏသာ (ယာယီ) သိမ်းဆည်းပေးထားပြီး၊ အချိန်အကန့်အသတ်ကျော်လွန်ပါက အလိုအလျောက် ဖျက်သိမ်းသွားပါမည်။</p>
+  </div>
+
+  <div class="card">
+    <h2>ဆက်သွယ်ရန်</h2>
+    <p>ဤ Policy နှင့် ပတ်သက်၍ မေးမြန်းလိုပါက Admin - <strong>@${ADMIN_TELEGRAM_USERNAME}</strong> ထံ ဆက်သွယ်နိုင်ပါသည်။</p>
+  </div>
+
+  <footer>Power By Ko Paing · AI Voice Studio</footer>
 </body>
 </html>`;
 }
