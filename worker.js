@@ -1,6 +1,6 @@
-
-const ADMIN_TELEGRAM_USERNAME = 'kopaing209'; 
+const ADMIN_TELEGRAM_USERNAME = 'kopaing209';  
 const TELEGRAM_BOT_USERNAME = 'kopaingvcabot';  
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -276,7 +276,7 @@ async function handleTelegramAuth(request, env, corsHeaders) {
   // Telegram username ကိုကြည့်ပြီး Admin ဟုတ်/မဟုတ် Auto Detect
   const isAdmin = (user.username || '').toLowerCase() === ADMIN_TELEGRAM_USERNAME;
 
-  const existing = await env.DB.prepare('SELECT id, is_banned FROM users WHERE id = ?1')
+  const existing = await env.DB.prepare('SELECT id, is_banned, referral_code FROM users WHERE id = ?1')
     .bind(String(user.id))
     .first();
 
@@ -317,34 +317,35 @@ async function handleTelegramAuth(request, env, corsHeaders) {
     isAdmin,
   });
 
-  // User အသစ်အတွက်သာ - ကိုယ်ပိုင် referral code ထုတ်ပေးပြီး၊ referrer ရှိရင် bonus ပေးမည်
-  if (!existing) {
+  // Referral code backfill: User အသစ်ဖြစ်ဖြစ်၊ Referral code မရှိသေးတဲ့ User အဟောင်းဖြစ်ဖြစ် ကိုယ်ပိုင် code ထုတ်ပေးမည်
+  if (!existing || !existing.referral_code) {
     const myReferralCode = await generateUniqueReferralCode(env);
     await env.DB.prepare(
-      `UPDATE users SET referral_code = ?1, referred_by = ?2, updated_at = datetime('now') WHERE id = ?3`
+      `UPDATE users SET referral_code = ?1, referred_by = COALESCE(referred_by, ?2), updated_at = datetime('now') WHERE id = ?3`
     )
       .bind(myReferralCode, referrerRow ? String(referrerRow.id) : null, String(user.id))
       .run();
+  }
 
-    if (referrerRow) {
-      const referrerBonus = parseInt(await getSetting(env, 'referral_bonus_referrer', '0'), 10) || 0;
-      const referredBonus = parseInt(await getSetting(env, 'referral_bonus_referred', '0'), 10) || 0;
+  // Referrer bonus + referrals history ကတော့ User အသစ်အတွက်သာ (Login ပြန်ဝင်တိုင်း ထပ်ခါထပ်ခါ bonus မပေးမိစေရန်)
+  if (!existing && referrerRow) {
+    const referrerBonus = parseInt(await getSetting(env, 'referral_bonus_referrer', '0'), 10) || 0;
+    const referredBonus = parseInt(await getSetting(env, 'referral_bonus_referred', '0'), 10) || 0;
 
-      if (referrerBonus > 0) {
-        await env.DB.prepare(
-          `UPDATE users SET credits = COALESCE(credits, 0) + ?1, updated_at = datetime('now') WHERE id = ?2`
-        )
-          .bind(referrerBonus, String(referrerRow.id))
-          .run();
-      }
-
+    if (referrerBonus > 0) {
       await env.DB.prepare(
-        `INSERT INTO referrals (referrer_id, referred_id, referrer_bonus, referred_bonus, created_at)
-         VALUES (?1, ?2, ?3, ?4, datetime('now'))`
+        `UPDATE users SET credits = COALESCE(credits, 0) + ?1, updated_at = datetime('now') WHERE id = ?2`
       )
-        .bind(String(referrerRow.id), String(user.id), referrerBonus, referredBonus)
+        .bind(referrerBonus, String(referrerRow.id))
         .run();
     }
+
+    await env.DB.prepare(
+      `INSERT INTO referrals (referrer_id, referred_id, referrer_bonus, referred_bonus, created_at)
+       VALUES (?1, ?2, ?3, ?4, datetime('now'))`
+    )
+      .bind(String(referrerRow.id), String(user.id), referrerBonus, referredBonus)
+      .run();
   }
 
   return json(
@@ -878,6 +879,17 @@ async function handleProfileGet(request, env, corsHeaders) {
 
   if (!user) {
     return json({ error: 'User not found' }, 404, corsHeaders);
+  }
+
+  // Referral code မရှိသေးတဲ့ User ဟောင်းများအတွက် fallback backfill (safety net)
+  if (!user.referral_code) {
+    const myReferralCode = await generateUniqueReferralCode(env);
+    await env.DB.prepare(
+      `UPDATE users SET referral_code = ?1, updated_at = datetime('now') WHERE id = ?2`
+    )
+      .bind(myReferralCode, String(userId))
+      .run();
+    user.referral_code = myReferralCode;
   }
 
   const referralStats = await env.DB.prepare(
