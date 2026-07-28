@@ -1,10 +1,6 @@
-// ===========================================================================
-// Cloudflare Worker - Ko Paing AI Voice Studio (Backend + Frontend)
-// (D1 Database Edition - Firebase removed)
-// ===========================================================================
 
-const ADMIN_TELEGRAM_USERNAME = 'kopaing209'; // @ မထည့်ပါနှင့်
-
+const ADMIN_TELEGRAM_USERNAME = 'kopaing209'; 
+const TELEGRAM_BOT_USERNAME = 'kopaingvcabot';  
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -36,6 +32,12 @@ export default {
       }
       if (url.pathname === '/plans') {
         return html(getPlansHtml());
+      }
+      if (url.pathname === '/profile') {
+        return html(getProfileHtml());
+      }
+      if (url.pathname === '/api-docs') {
+        return html(getApiDocsHtml());
       }
       if (url.pathname === '/privacy') {
         return html(getPrivacyHtml());
@@ -133,6 +135,25 @@ export default {
         return await handleAdminPurchaseReview(request, env, corsHeaders);
       }
 
+      // ---- Profile / Referral / API Key -----------------------------------
+      if (url.pathname === '/api/profile/get' && request.method === 'POST') {
+        return await handleProfileGet(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/profile/api-key/generate' && request.method === 'POST') {
+        return await handleApiKeyGenerate(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/profile/api-key/revoke' && request.method === 'POST') {
+        return await handleApiKeyRevoke(request, env, corsHeaders);
+      }
+
+      // ---- Public API (v1) for external site/app integration via API Key --
+      if (url.pathname === '/api/v1/generate' && request.method === 'POST') {
+        return await handleApiV1Generate(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/v1/generate/status' && request.method === 'POST') {
+        return await handleApiV1GenerateStatus(request, env, corsHeaders);
+      }
+
       return json({ error: 'Not Found' }, 404, corsHeaders);
     } catch (err) {
       console.error('Worker Request Error:', err);
@@ -201,13 +222,44 @@ function requireAdmin(env, token) {
   return !!token && token === env.SESSION_SECRET;
 }
 
+// ---- Referral code + API key helpers --------------------------------------
+
+function generateReferralCodeString() {
+  const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // 0/O/1/I/L ကဲ့သို့ မှားလွယ်တဲ့စာလုံးများ ဖယ်ထားသည်
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  let code = '';
+  for (let i = 0; i < 8; i++) code += chars[bytes[i] % chars.length];
+  return code;
+}
+
+async function generateUniqueReferralCode(env) {
+  for (let i = 0; i < 5; i++) {
+    const code = generateReferralCodeString();
+    const exists = await env.DB.prepare('SELECT id FROM users WHERE referral_code = ?1').bind(code).first();
+    if (!exists) return code;
+  }
+  return 'R' + Date.now().toString(36).toUpperCase();
+}
+
+function generateApiKeyPlaintext() {
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+  return 'kpv_' + hex;
+}
+
+async function sha256Hex(text) {
+  const enc = new TextEncoder().encode(text);
+  const digest = await crypto.subtle.digest('SHA-256', enc);
+  return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 // ===========================================================================
 // Request Handlers
 // ===========================================================================
 
 async function handleTelegramAuth(request, env, corsHeaders) {
   const body = await request.json();
-  const { initData } = body;
+  const { initData, referralCode } = body;
 
   if (!initData) {
     return json({ error: 'Missing initData' }, 400, corsHeaders);
@@ -237,10 +289,25 @@ async function handleTelegramAuth(request, env, corsHeaders) {
   }
 
   // Signup Bonus: user အသစ်အတွက်သာ Admin သတ်မှတ်ထားတဲ့ bonus credits ကို ပေးမည်
+  // Referral: valid referral code ဖြင့် ဝင်ရောက်လာသော user အသစ်အတွက် ထပ်ဆောင်း bonus ပေးမည်
   let initialCredits;
+  let referrerRow = null;
   if (!existing) {
     const bonus = await getSetting(env, 'signup_bonus', '0');
     initialCredits = parseInt(bonus, 10) || 0;
+
+    if (referralCode && String(referralCode).trim()) {
+      referrerRow = await env.DB.prepare('SELECT id FROM users WHERE referral_code = ?1')
+        .bind(String(referralCode).trim().toUpperCase())
+        .first();
+      if (referrerRow && String(referrerRow.id) === String(user.id)) {
+        referrerRow = null; // ကိုယ့်ကိုယ်ကို refer လုပ်တာကို ignore လုပ်မည်
+      }
+      if (referrerRow) {
+        const referredBonus = parseInt(await getSetting(env, 'referral_bonus_referred', '0'), 10) || 0;
+        initialCredits += referredBonus;
+      }
+    }
   }
 
   await upsertUser(env, user.id, {
@@ -249,6 +316,36 @@ async function handleTelegramAuth(request, env, corsHeaders) {
     credits: existing ? undefined : initialCredits,
     isAdmin,
   });
+
+  // User အသစ်အတွက်သာ - ကိုယ်ပိုင် referral code ထုတ်ပေးပြီး၊ referrer ရှိရင် bonus ပေးမည်
+  if (!existing) {
+    const myReferralCode = await generateUniqueReferralCode(env);
+    await env.DB.prepare(
+      `UPDATE users SET referral_code = ?1, referred_by = ?2, updated_at = datetime('now') WHERE id = ?3`
+    )
+      .bind(myReferralCode, referrerRow ? String(referrerRow.id) : null, String(user.id))
+      .run();
+
+    if (referrerRow) {
+      const referrerBonus = parseInt(await getSetting(env, 'referral_bonus_referrer', '0'), 10) || 0;
+      const referredBonus = parseInt(await getSetting(env, 'referral_bonus_referred', '0'), 10) || 0;
+
+      if (referrerBonus > 0) {
+        await env.DB.prepare(
+          `UPDATE users SET credits = COALESCE(credits, 0) + ?1, updated_at = datetime('now') WHERE id = ?2`
+        )
+          .bind(referrerBonus, String(referrerRow.id))
+          .run();
+      }
+
+      await env.DB.prepare(
+        `INSERT INTO referrals (referrer_id, referred_id, referrer_bonus, referred_bonus, created_at)
+         VALUES (?1, ?2, ?3, ?4, datetime('now'))`
+      )
+        .bind(String(referrerRow.id), String(user.id), referrerBonus, referredBonus)
+        .run();
+    }
+  }
 
   return json(
     { success: true, user: { ...user, isAdmin }, token: isAdmin ? env.SESSION_SECRET : null },
@@ -456,7 +553,18 @@ async function handleAdminSettingsGet(request, env, corsHeaders) {
   }
 
   const signupBonus = await getSetting(env, 'signup_bonus', '0');
-  return json({ success: true, signupBonus: parseInt(signupBonus, 10) || 0 }, 200, corsHeaders);
+  const referralBonusReferrer = await getSetting(env, 'referral_bonus_referrer', '0');
+  const referralBonusReferred = await getSetting(env, 'referral_bonus_referred', '0');
+  return json(
+    {
+      success: true,
+      signupBonus: parseInt(signupBonus, 10) || 0,
+      referralBonusReferrer: parseInt(referralBonusReferrer, 10) || 0,
+      referralBonusReferred: parseInt(referralBonusReferred, 10) || 0,
+    },
+    200,
+    corsHeaders
+  );
 }
 
 async function handleAdminSettingsUpdate(request, env, corsHeaders) {
@@ -467,6 +575,12 @@ async function handleAdminSettingsUpdate(request, env, corsHeaders) {
 
   if (body.signupBonus !== undefined) {
     await setSetting(env, 'signup_bonus', String(parseInt(body.signupBonus, 10) || 0));
+  }
+  if (body.referralBonusReferrer !== undefined) {
+    await setSetting(env, 'referral_bonus_referrer', String(parseInt(body.referralBonusReferrer, 10) || 0));
+  }
+  if (body.referralBonusReferred !== undefined) {
+    await setSetting(env, 'referral_bonus_referred', String(parseInt(body.referralBonusReferred, 10) || 0));
   }
 
   return json({ success: true }, 200, corsHeaders);
@@ -738,6 +852,216 @@ async function handleGenerateStatus(request, env, corsHeaders) {
       `UPDATE users SET credits = COALESCE(credits, 0) + ?1, updated_at = datetime('now') WHERE id = ?2`
     )
       .bind(Number(cost), String(userId))
+      .run();
+  }
+
+  return json(data, 200, corsHeaders);
+}
+
+// ===========================================================================
+// Profile / Referral / API Key
+// ===========================================================================
+
+async function handleProfileGet(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { userId } = body;
+
+  if (!userId) {
+    return json({ error: 'Missing userId' }, 400, corsHeaders);
+  }
+
+  const user = await env.DB.prepare(
+    'SELECT id, name, username, credits, referral_code, api_key_prefix, api_key_created_at FROM users WHERE id = ?1'
+  )
+    .bind(String(userId))
+    .first();
+
+  if (!user) {
+    return json({ error: 'User not found' }, 404, corsHeaders);
+  }
+
+  const referralStats = await env.DB.prepare(
+    'SELECT COUNT(*) as count, COALESCE(SUM(referrer_bonus), 0) as totalBonus FROM referrals WHERE referrer_id = ?1'
+  )
+    .bind(String(userId))
+    .first();
+
+  const botUsername = env.TELEGRAM_BOT_USERNAME || TELEGRAM_BOT_USERNAME;
+  const referralLink = user.referral_code ? `https://t.me/${botUsername}?startapp=${user.referral_code}` : null;
+
+  return json(
+    {
+      success: true,
+      user: {
+        id: user.id,
+        name: user.name,
+        username: user.username,
+        credits: user.credits,
+        referralCode: user.referral_code,
+        referralLink,
+        referredCount: referralStats ? referralStats.count : 0,
+        referralCreditsEarned: referralStats ? referralStats.totalBonus : 0,
+        hasApiKey: !!user.api_key_prefix,
+        apiKeyPrefix: user.api_key_prefix,
+        apiKeyCreatedAt: user.api_key_created_at,
+      },
+    },
+    200,
+    corsHeaders
+  );
+}
+
+async function handleApiKeyGenerate(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { userId } = body;
+
+  if (!userId) {
+    return json({ error: 'Missing userId' }, 400, corsHeaders);
+  }
+
+  const user = await env.DB.prepare('SELECT id FROM users WHERE id = ?1').bind(String(userId)).first();
+  if (!user) {
+    return json({ error: 'User not found' }, 404, corsHeaders);
+  }
+
+  const plainKey = generateApiKeyPlaintext();
+  const hash = await sha256Hex(plainKey);
+  const prefix = plainKey.slice(0, 12) + '…';
+
+  await env.DB.prepare(
+    `UPDATE users SET api_key_hash = ?1, api_key_prefix = ?2, api_key_created_at = datetime('now'), updated_at = datetime('now') WHERE id = ?3`
+  )
+    .bind(hash, prefix, String(userId))
+    .run();
+
+  // ဒီ plaintext key ကို database ထဲမှာ မသိမ်းပါ (hash ကိုသာ သိမ်းသည်) — ဒါကြောင့် ဒီတစ်ကြိမ်တည်းသာ ပြန်ပေးနိုင်ပါသည်
+  return json({ success: true, apiKey: plainKey, apiKeyPrefix: prefix }, 200, corsHeaders);
+}
+
+async function handleApiKeyRevoke(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { userId } = body;
+
+  if (!userId) {
+    return json({ error: 'Missing userId' }, 400, corsHeaders);
+  }
+
+  await env.DB.prepare(
+    `UPDATE users SET api_key_hash = NULL, api_key_prefix = NULL, api_key_created_at = NULL, updated_at = datetime('now') WHERE id = ?1`
+  )
+    .bind(String(userId))
+    .run();
+
+  return json({ success: true }, 200, corsHeaders);
+}
+
+// ===========================================================================
+// Public API (v1) — External website/App များမှ API Key ဖြင့် ချိတ်ဆက်အသုံးပြုနိုင်ရန်
+// (Telegram Mini App session မလိုအပ်ပါ၊ apiKey တစ်ခုတည်းဖြင့် authenticate လုပ်သည်)
+// ===========================================================================
+
+async function handleApiV1Generate(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { apiKey, text, refAudioBase64, promptText, controlInstruction, style, voiceType } = body;
+
+  if (!apiKey) {
+    return json({ error: 'Missing apiKey' }, 401, corsHeaders);
+  }
+  if (!text || !text.trim()) {
+    return json({ error: 'text လိုအပ်ပါသည်' }, 400, corsHeaders);
+  }
+  if (!env.RUNPOD_API_KEY || !env.RUNPOD_ENDPOINT_ID) {
+    return json({ error: 'RunPod environment variables missing' }, 500, corsHeaders);
+  }
+
+  const hash = await sha256Hex(apiKey);
+  const user = await env.DB.prepare('SELECT id, credits, is_banned FROM users WHERE api_key_hash = ?1')
+    .bind(hash)
+    .first();
+
+  if (!user) {
+    return json({ error: 'Invalid API key' }, 401, corsHeaders);
+  }
+  if (user.is_banned) {
+    return json({ error: 'Account banned' }, 403, corsHeaders);
+  }
+
+  const cost = text.trim().length;
+  const currentCredits = Number(user.credits || 0);
+  if (currentCredits < cost) {
+    return json(
+      { error: `Credits မလုံလောက်ပါ။ လိုအပ်ချက်: ${cost}, လက်ကျန်: ${currentCredits}` },
+      402,
+      corsHeaders
+    );
+  }
+
+  const input = { text: text.trim() };
+  if (refAudioBase64) {
+    input.reference_audio_base64 = refAudioBase64;
+    if (promptText && promptText.trim()) input.prompt_text = promptText.trim();
+  }
+  if (controlInstruction && controlInstruction.trim()) input.control_instruction = controlInstruction.trim();
+  if (style) input.style = style;
+  if (voiceType) input.voice_type = voiceType;
+
+  const runRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/run`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${env.RUNPOD_API_KEY}`,
+    },
+    body: JSON.stringify({ input }),
+  });
+
+  const runData = await runRes.json();
+  if (!runRes.ok || !runData.id) {
+    return json({ error: runData.error || 'RunPod request failed' }, 500, corsHeaders);
+  }
+
+  await env.DB.prepare(
+    `UPDATE users SET credits = COALESCE(credits, 0) - ?1, updated_at = datetime('now') WHERE id = ?2`
+  )
+    .bind(cost, user.id)
+    .run();
+
+  return json(
+    { success: true, jobId: runData.id, cost, remainingCredits: currentCredits - cost },
+    200,
+    corsHeaders
+  );
+}
+
+async function handleApiV1GenerateStatus(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { apiKey, jobId, cost } = body;
+
+  if (!apiKey) {
+    return json({ error: 'Missing apiKey' }, 401, corsHeaders);
+  }
+  if (!jobId) {
+    return json({ error: 'Missing jobId' }, 400, corsHeaders);
+  }
+  if (!env.RUNPOD_API_KEY || !env.RUNPOD_ENDPOINT_ID) {
+    return json({ error: 'RunPod environment variables missing' }, 500, corsHeaders);
+  }
+
+  const hash = await sha256Hex(apiKey);
+  const user = await env.DB.prepare('SELECT id FROM users WHERE api_key_hash = ?1').bind(hash).first();
+  if (!user) {
+    return json({ error: 'Invalid API key' }, 401, corsHeaders);
+  }
+
+  const statusRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/status/${jobId}`, {
+    headers: { Authorization: `Bearer ${env.RUNPOD_API_KEY}` },
+  });
+  const data = await statusRes.json();
+
+  if ((data.status === 'FAILED' || data.status === 'CANCELLED') && cost) {
+    await env.DB.prepare(
+      `UPDATE users SET credits = COALESCE(credits, 0) + ?1, updated_at = datetime('now') WHERE id = ?2`
+    )
+      .bind(Number(cost), user.id)
       .run();
   }
 
@@ -1030,7 +1354,10 @@ function getLandingHtml() {
         const res = await fetch('/api/auth/telegram', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ initData: tg.initData })
+          body: JSON.stringify({
+            initData: tg.initData,
+            referralCode: (tg.initDataUnsafe && tg.initDataUnsafe.start_param) || undefined
+          })
         });
         const data = await res.json();
 
@@ -1298,6 +1625,17 @@ function getAdminDashboardHtml() {
           <div class="msg" id="bonusMsg"></div>
         </div>
         <div class="card">
+          <h3>Referral Program</h3>
+          <div class="row2">
+            <div class="field"><label>Referrer Bonus (လူသစ် ခေါ်လာသူ ရမည့် credits)</label>
+              <input id="referralBonusReferrer" type="number" value="\${data.referralBonusReferrer || 0}"></div>
+            <div class="field"><label>Referred Bonus (Referral code နဲ့ ဝင်လာသူ ရမည့် ထပ်ဆောင်း credits)</label>
+              <input id="referralBonusReferred" type="number" value="\${data.referralBonusReferred || 0}"></div>
+          </div>
+          <button class="btn" onclick="saveReferralBonus()">Save</button>
+          <div class="msg" id="referralMsg"></div>
+        </div>
+        <div class="card">
           <h3>Payment Setup</h3>
           <div class="row2" style="margin-bottom:12px;">
             <button class="btn small" id="payCountryMM" onclick="switchPayCountry('MM')">🇲🇲 Myanmar</button>
@@ -1321,6 +1659,15 @@ function getAdminDashboardHtml() {
       const signupBonus = document.getElementById('signupBonus').value;
       const msg = document.getElementById('bonusMsg');
       const { ok, data } = await api('/api/admin/settings/update', { signupBonus });
+      msg.textContent = ok && data.success ? 'Saved!' : (data.error || 'Failed');
+      msg.className = 'msg ' + (ok && data.success ? 'ok' : 'err');
+    }
+
+    async function saveReferralBonus() {
+      const referralBonusReferrer = document.getElementById('referralBonusReferrer').value;
+      const referralBonusReferred = document.getElementById('referralBonusReferred').value;
+      const msg = document.getElementById('referralMsg');
+      const { ok, data } = await api('/api/admin/settings/update', { referralBonusReferrer, referralBonusReferred });
       msg.textContent = ok && data.success ? 'Saved!' : (data.error || 'Failed');
       msg.className = 'msg ' + (ok && data.success ? 'ok' : 'err');
     }
@@ -1599,6 +1946,7 @@ ${FAVICON}
 
   <div class="top-actions">
     <a href="/plans" class="btn">🎫 Plans / Buy</a>
+    <a href="/profile" class="btn">👤 Profile</a>
     <div id="adminLinkWrap"></div>
   </div>
 
@@ -2179,6 +2527,355 @@ function getPlansHtml() {
 
     loadPlans();
   </script>
+</body>
+</html>`;
+}
+
+// ===========================================================================
+// Profile Page (Account / Referral / API Key)
+// ===========================================================================
+
+function getProfileHtml() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Profile · Ko Paing AI Voice Studio</title>
+  ${FAVICON}
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background-color: #f7f6f0;
+      margin: 0;
+      padding: 20px;
+      max-width: 480px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    .top { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
+    .top h1 { font-size: 16px; margin: 0; letter-spacing: 0.5px; }
+    a.back { font-size: 12px; color: #666; text-decoration: none; }
+    .card {
+      background: #fff; border-radius: 8px; padding: 18px; margin: 16px 0;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.05); border: 1px solid #eee;
+    }
+    .card h3 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: #555; }
+    .stat-row { display: flex; gap: 10px; }
+    .stat-row .stat { flex: 1; background: #f7f6f0; border-radius: 6px; padding: 12px; text-align: center; }
+    .stat-row .stat .n { font-size: 20px; font-weight: 600; color: #b5482f; }
+    .stat-row .stat .l { font-size: 11px; color: #888; margin-top: 2px; }
+    .row2 { display: flex; gap: 10px; }
+    .row2 > * { flex: 1; }
+    .code-box {
+      background: #f7f6f0; border-radius: 6px; padding: 10px 12px; font-size: 13px;
+      display: flex; align-items: center; justify-content: space-between; gap: 8px; word-break: break-all;
+    }
+    .code-box code { font-family: monospace; font-size: 13px; }
+    button.btn {
+      background: #1a1a1a; color: #fff; border: none; padding: 10px 16px; font-size: 12.5px;
+      letter-spacing: 0.5px; cursor: pointer; border-radius: 4px;
+    }
+    button.btn.small { padding: 6px 10px; font-size: 11.5px; }
+    button.btn.ghost { background: #fff; color: #1a1a1a; border: 1px solid #ccc; }
+    button.btn.danger { background: #d9534f; }
+    .msg { font-size: 12px; margin-top: 8px; }
+    .msg.ok { color: #4a5d4a; }
+    .msg.err { color: #d9534f; }
+    .apikey-plain {
+      background: #fff8e6; border: 1px solid #f0d98c; border-radius: 6px; padding: 12px;
+      font-family: monospace; font-size: 12.5px; word-break: break-all; margin-top: 10px;
+    }
+    .warn { font-size: 11.5px; color: #b5482f; margin-top: 6px; }
+    .empty { text-align: center; color: #999; padding: 30px 10px; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <div style="font-size:20px;">👤</div>
+    <h1>My Profile</h1>
+  </div>
+  <a href="/studio" class="back">← Back to Studio</a>
+
+  <div id="wrap"><div class="empty">Loading…</div></div>
+
+  <script>
+    let tgUser = null;
+    try { tgUser = JSON.parse(sessionStorage.getItem('tg_user') || 'null'); } catch(e){}
+
+    if (!tgUser || !tgUser.id) {
+      document.getElementById('wrap').innerHTML = '<div class="empty">Telegram App ကနေ ပြန်ဝင်ပေးပါ။</div>';
+    } else {
+      loadProfile();
+    }
+
+    let profileData = null;
+
+    async function loadProfile() {
+      const wrap = document.getElementById('wrap');
+      try {
+        const res = await fetch('/api/profile/get', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ userId: tgUser.id })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          wrap.innerHTML = '<div class="empty">' + (data.error || 'Failed to load profile') + '</div>';
+          return;
+        }
+        profileData = data.user;
+        renderProfile();
+      } catch (err) {
+        wrap.innerHTML = '<div class="empty">Network error</div>';
+      }
+    }
+
+    function renderProfile() {
+      const u = profileData;
+      const wrap = document.getElementById('wrap');
+      wrap.innerHTML = \`
+        <div class="card">
+          <h3>Account</h3>
+          <div class="stat-row">
+            <div class="stat"><div class="n">\${u.credits ?? 0}</div><div class="l">Credits</div></div>
+            <div class="stat"><div class="n">\${u.referredCount ?? 0}</div><div class="l">Referred</div></div>
+            <div class="stat"><div class="n">\${u.referralCreditsEarned ?? 0}</div><div class="l">Referral Credits</div></div>
+          </div>
+          <div style="margin-top:12px; font-size:13px; color:#555;">\${u.name || ''}\${u.username ? ' · @' + u.username : ''}</div>
+        </div>
+
+        <div class="card">
+          <h3>Referral Program</h3>
+          <p style="font-size:12.5px; color:#666; margin-top:0;">သင့် Referral Link ကို မိတ်ဆွေများထံ ဝေမျှပြီး App ကို ဖိတ်ခေါ်ပါ — သူတို့ ဝင်ရောက်တာနဲ့ credits ရရှိမည်ဖြစ်ပါသည်။</p>
+          <div class="code-box">
+            <code id="refCode">\${u.referralCode || '-'}</code>
+            <button class="btn small ghost" onclick="copyText(u_referralCode())">Copy Code</button>
+          </div>
+          \${u.referralLink ? \`
+          <div class="code-box" style="margin-top:8px;">
+            <code style="font-size:11.5px;">\${u.referralLink}</code>
+            <button class="btn small ghost" onclick="copyText(u_referralLink())">Copy Link</button>
+          </div>\` : ''}
+        </div>
+
+        <div class="card">
+          <h3>API Key</h3>
+          <p style="font-size:12.5px; color:#666; margin-top:0;">သင့် website / App ကနေ တိုက်ရိုက် Voice Generate ခေါ်သုံးနိုင်ဖို့ API Key လိုအပ်ပါသည်။</p>
+          \${u.hasApiKey ? \`
+            <div class="code-box"><code>\${u.apiKeyPrefix}</code><span style="font-size:11px; color:#999;">Active</span></div>
+            <div class="row2" style="margin-top:10px;">
+              <button class="btn ghost" onclick="generateApiKey()">Regenerate</button>
+              <button class="btn danger" onclick="revokeApiKey()">Revoke</button>
+            </div>
+          \` : \`
+            <button class="btn" onclick="generateApiKey()">Generate API Key</button>
+          \`}
+          <div id="apiKeyResult"></div>
+          <div class="msg" id="apiKeyMsg"></div>
+          <div style="margin-top:12px;"><a href="/api-docs" class="back">📄 View API Documentation →</a></div>
+        </div>
+      \`;
+    }
+
+    function u_referralCode() { return (profileData && profileData.referralCode) || ''; }
+    function u_referralLink() { return (profileData && profileData.referralLink) || ''; }
+
+    function copyText(text) {
+      if (!text) return;
+      navigator.clipboard.writeText(text).then(() => {
+        if (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.showAlert) {
+          window.Telegram.WebApp.showAlert('Copied!');
+        } else {
+          alert('Copied!');
+        }
+      });
+    }
+
+    async function generateApiKey() {
+      const msg = document.getElementById('apiKeyMsg');
+      const resultBox = document.getElementById('apiKeyResult');
+      msg.textContent = ''; resultBox.innerHTML = '';
+      try {
+        const res = await fetch('/api/profile/api-key/generate', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ userId: tgUser.id })
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          resultBox.innerHTML = '<div class="apikey-plain">' + data.apiKey + '</div><div class="warn">⚠️ ဒီ Key ကို ဒီတစ်ကြိမ်တည်းသာ ပြသပါမည် — ကူးယူ၍ လုံခြုံစွာသိမ်းထားပါ။</div>';
+          await loadProfile();
+        } else {
+          msg.textContent = data.error || 'Failed';
+          msg.className = 'msg err';
+        }
+      } catch (err) {
+        msg.textContent = 'Network error';
+        msg.className = 'msg err';
+      }
+    }
+
+    async function revokeApiKey() {
+      if (!confirm('API Key ကို ပယ်ဖျက်မှာ သေချာပါသလား? ဒီ Key နဲ့ ချိတ်ဆက်ထားတဲ့ App/Website များ အလုပ်လုပ်တော့မည် မဟုတ်ပါ။')) return;
+      const { ok, data } = await (async () => {
+        const res = await fetch('/api/profile/api-key/revoke', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ userId: tgUser.id })
+        });
+        return { ok: res.ok, data: await res.json() };
+      })();
+      if (ok && data.success) await loadProfile();
+      else alert(data.error || 'Failed');
+    }
+  </script>
+</body>
+</html>`;
+}
+
+// ===========================================================================
+// API Documentation Page
+// ===========================================================================
+
+function getApiDocsHtml() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>API Docs · Ko Paing AI Voice Studio</title>
+  ${FAVICON}
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background-color: #f7f6f0;
+      margin: 0;
+      padding: 20px;
+      max-width: 640px;
+      margin-left: auto;
+      margin-right: auto;
+      line-height: 1.6;
+      color: #333;
+    }
+    .top { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
+    .top h1 { font-size: 16px; margin: 0; letter-spacing: 0.5px; }
+    a.back { font-size: 12px; color: #666; text-decoration: none; }
+    h2 { font-size: 15px; margin-top: 32px; border-bottom: 1px solid #ddd; padding-bottom: 6px; }
+    h3 { font-size: 13px; margin-top: 20px; color: #555; }
+    p { font-size: 13.5px; }
+    code, pre {
+      font-family: 'SF Mono', Consolas, monospace; font-size: 12.5px;
+      background: #1a1a1a; color: #f5f5f0; border-radius: 6px;
+    }
+    code { padding: 2px 6px; }
+    pre { padding: 14px; overflow-x: auto; white-space: pre; }
+    table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin: 10px 0; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #eee; }
+    th { background: #fff; color: #888; text-transform: uppercase; font-size: 10.5px; letter-spacing: 0.5px; }
+    .badge { display: inline-block; background: #1a1a1a; color: #fff; font-size: 10.5px; padding: 2px 8px; border-radius: 10px; margin-right: 6px; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <div style="font-size:20px;">📄</div>
+    <h1>API Documentation</h1>
+  </div>
+  <a href="/profile" class="back">← Back to Profile</a>
+
+  <p>ဒီ API ကို သင့် website သို့မဟုတ် App (Android/iOS/Web) ကနေ တိုက်ရိုက် ခေါ်သုံးနိုင်ပါတယ်။ Authenticate လုပ်ဖို့ Profile page ကနေ ရယူထားတဲ့ <strong>API Key</strong> လိုအပ်ပါသည်။</p>
+
+  <h2>Base URL</h2>
+  <pre>https://YOUR-WORKER-DOMAIN</pre>
+  <p style="font-size:12px; color:#888;">(သင့် Cloudflare Worker ရဲ့ actual domain ကို အစားထိုးပါ)</p>
+
+  <h2>Authentication</h2>
+  <p>Request body ထဲမှာ <code>apiKey</code> field ပါ ထည့်ပေးပါ။ Key ကို Profile page → API Key → Generate ကနေ ရယူနိုင်ပါတယ်။ Key ကို ဒီတစ်ကြိမ်တည်းသာ ပြသမည်ဖြစ်၍ လုံခြုံစွာ သိမ်းထားပါ။</p>
+
+  <h2>Credits</h2>
+  <p>Voice တစ်ခါ Generate လုပ်တိုင်း <code>text</code> ရဲ့ character အရေအတွက်အတိုင်း credits နုတ်ယူပါသည်။ Credits မလုံလောက်ရင် <code>402</code> error ပြန်ပေးပါမည်။ Job fail/cancel ဖြစ်ရင် နုတ်ထားတဲ့ credits ကို auto ပြန်ထည့်ပေးပါသည်။</p>
+
+  <h2>1. Generate Voice</h2>
+  <span class="badge">POST</span><code>/api/v1/generate</code>
+
+  <h3>Request Body</h3>
+  <pre>{
+  "apiKey": "kpv_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "text": "မင်္ဂလာပါ",
+  "refAudioBase64": "",        // Optional - voice cloning
+  "promptText": "",            // Optional - reference audio ရဲ့ transcript
+  "controlInstruction": "",    // Optional - e.g. "Speaks slowly."
+  "style": "",                 // Optional - e.g. "happy", "news", "calm"
+  "voiceType": ""              // Optional - "female" | "male"
+}</pre>
+
+  <table>
+    <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    <tr><td>apiKey</td><td>string</td><td>Yes</td><td>Profile page ကနေ ရထားတဲ့ API Key</td></tr>
+    <tr><td>text</td><td>string</td><td>Yes</td><td>ထွက်လိုတဲ့ စာသား</td></tr>
+    <tr><td>refAudioBase64</td><td>string</td><td>No</td><td>Voice cloning အတွက် reference audio (base64 WAV)</td></tr>
+    <tr><td>promptText</td><td>string</td><td>No</td><td>reference audio ထဲက စာသား (cloning quality တိုးစေသည်)</td></tr>
+    <tr><td>controlInstruction</td><td>string</td><td>No</td><td>Pace instruction, e.g. "Speaks slowly."</td></tr>
+    <tr><td>style</td><td>string</td><td>No</td><td>Mood/style tag</td></tr>
+    <tr><td>voiceType</td><td>string</td><td>No</td><td>"female" or "male" (reference audio မပါရင်သာ အလုပ်လုပ်သည်)</td></tr>
+  </table>
+
+  <h3>Response (200)</h3>
+  <pre>{
+  "success": true,
+  "jobId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "cost": 9,
+  "remainingCredits": 4991
+}</pre>
+
+  <h3>Error Responses</h3>
+  <table>
+    <tr><th>Status</th><th>Meaning</th></tr>
+    <tr><td>400</td><td>text မပါ / မှား</td></tr>
+    <tr><td>401</td><td>apiKey မပါ / မှား</td></tr>
+    <tr><td>402</td><td>Credits မလုံလောက်</td></tr>
+    <tr><td>403</td><td>Account ပိတ်ထားသည်</td></tr>
+    <tr><td>500</td><td>Server / RunPod error</td></tr>
+  </table>
+
+  <h2>2. Check Generation Status</h2>
+  <span class="badge">POST</span><code>/api/v1/generate/status</code>
+  <p>Generate request ပြီးနောက် ရရှိလာတဲ့ <code>jobId</code> ကို 1–2 စက္ကန့်တစ်ခါ Poll လုပ်ပြီး status စစ်ပါ။</p>
+
+  <h3>Request Body</h3>
+  <pre>{
+  "apiKey": "kpv_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "jobId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "cost": 9
+}</pre>
+  <p style="font-size:12px; color:#888;">(<code>cost</code> ကို ပါထည့်ပေးပါက Job fail ဖြစ်သွားရင် credits auto refund လုပ်ပေးပါမည်)</p>
+
+  <h3>Response — Processing</h3>
+  <pre>{ "id": "...", "status": "IN_PROGRESS" }</pre>
+
+  <h3>Response — Completed</h3>
+  <pre>{
+  "id": "...",
+  "status": "COMPLETED",
+  "output": {
+    "audio_base64": "....",
+    "sample_rate": 24000,
+    "format": "wav"
+  }
+}</pre>
+
+  <h2>Example — cURL</h2>
+  <pre>curl -X POST https://YOUR-WORKER-DOMAIN/api/v1/generate \\
+  -H "Content-Type: application/json" \\
+  -d '{"apiKey":"kpv_xxxxxxxxxxxxxxxx","text":"မင်္ဂလာပါ"}'</pre>
+
+  <h2>Example — JavaScript (fetch)</h2>
+  <pre>const res = await fetch('https://YOUR-WORKER-DOMAIN/api/v1/generate', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ apiKey: 'kpv_xxxxxxxxxxxxxxxx', text: 'မင်္ဂလာပါ' })
+});
+const data = await res.json();
+// data.jobId ကို /api/v1/generate/status နဲ့ Poll လုပ်ပါ</pre>
+
+  <p style="margin-top:30px; font-size:12px; color:#999;">API Key ကို ပါးစပ်ဖြင့် မမျှဝေပါနှင့် — Key ပေါက်ကြားပါက Profile page ကနေ Regenerate/Revoke လုပ်နိုင်ပါသည်။</p>
 </body>
 </html>`;
 }
