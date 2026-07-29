@@ -1770,13 +1770,13 @@ function getStudioHtml() {
 <title>Ko Paing 🎙️ AI Voice Studio</title>
 ${FAVICON}
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;1,9..144,500&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap');
 
   :root{
-    --ink:      #1c1b19;
+    --ink:      #201f1c;
     --paper:    #f7f4ee;
-    --panel:    #ffffff;
-    --line:     #e3ddd0;
+    --panel:    #fffdf8;
+    --line:     #e4ddcc;
     --moss:     #4a5d4a;
     --moss-dim: #7c8c7c;
     --wax:      #b5482f;
@@ -1798,8 +1798,21 @@ ${FAVICON}
     pointer-events:none;
     z-index:0;
   }
-  .wrap{ position:relative; z-index:1; max-width:760px; margin:0 auto; padding:40px 24px 90px; }
-  header{ margin-bottom:32px; display:flex; justify-content:space-between; align-items:flex-start; gap:16px; }
+  .wrap{ position:relative; z-index:1; max-width:720px; margin:0 auto; padding:28px 24px 90px; }
+
+  /* ---- top nav: plain set type, no icon pills ---- */
+  .masthead-nav{
+    display:flex; justify-content:flex-end; align-items:center; gap:20px;
+    margin-bottom:34px; font-family:'IBM Plex Mono', monospace; font-size:11px;
+    letter-spacing:0.08em; text-transform:uppercase;
+  }
+  .masthead-nav a{
+    color:#8a8374; text-decoration:none; padding-bottom:3px;
+    border-bottom:1px solid transparent; transition:color .15s ease, border-color .15s ease;
+  }
+  .masthead-nav a:hover{ color:var(--wax); border-color:var(--wax); }
+
+  header{ margin-bottom:38px; }
   .eyebrow{
     font-family:'IBM Plex Mono', monospace;
     font-size:11px; letter-spacing:0.14em; text-transform:uppercase; color:var(--wax);
@@ -1807,39 +1820,56 @@ ${FAVICON}
   }
   .eyebrow .dot{ width:6px; height:6px; border-radius:50%; background:var(--moss-dim); display:inline-block; }
   .eyebrow .dot.live{ background:var(--wax); box-shadow:0 0 0 3px rgba(181,72,47,0.15); }
+  .head-row{ display:flex; justify-content:space-between; align-items:flex-end; gap:20px; }
   h1{
     font-family:'Fraunces', serif; font-optical-sizing:auto; font-weight:600;
-    font-size:clamp(28px, 5vw, 40px); line-height:1.05; margin:0 0 8px; letter-spacing:-0.01em;
+    font-size:clamp(28px, 5vw, 38px); line-height:1.05; margin:0 0 8px; letter-spacing:-0.01em;
   }
-  .sub{ font-size:14px; color:#57534a; max-width:46ch; line-height:1.5; }
-  .credits-box{
-    background:var(--panel); border:1px solid var(--line); border-radius:2px;
-    padding:14px 18px; text-align:center; flex-shrink:0; min-width:110px;
+  .sub{ font-size:14px; color:#57534a; max-width:44ch; line-height:1.55; }
+  .balance{ flex-shrink:0; text-align:right; padding-bottom:2px; }
+  .balance-num{
+    display:block; font-family:'Fraunces', serif; font-weight:600; font-size:26px;
+    color:var(--moss); line-height:1;
   }
-  .credits-box .num{ font-family:'Fraunces', serif; font-size:24px; font-weight:600; color:var(--moss); line-height:1; }
-  .credits-box .label{
-    font-family:'IBM Plex Mono', monospace; font-size:9.5px; letter-spacing:0.1em;
-    text-transform:uppercase; color:#a39c8c; margin-top:4px;
+  .balance-label{
+    display:block; font-family:'IBM Plex Mono', monospace; font-size:9.5px; letter-spacing:0.12em;
+    text-transform:uppercase; color:#a39c8c; margin-top:5px;
   }
-  .adminlink{
-    display:inline-block; margin-top:8px; font-family:'IBM Plex Mono', monospace; font-size:10.5px;
-    letter-spacing:0.06em; text-transform:uppercase; color:var(--moss); text-decoration:none;
-  }
-  .adminlink:hover{ color:var(--wax); }
 
-  .panel{ background:var(--panel); border:1px solid var(--line); border-radius:2px; box-shadow:var(--shadow); }
-  .row{ padding:22px 24px; border-bottom:1px solid var(--line); }
-  .row:last-child{ border-bottom:none; }
+  /* ---- the session sheet: numbered stages joined by a marginal spine ---- */
+  .reel{ position:relative; }
+  .stage{ display:flex; gap:18px; position:relative; }
+  .stage + .stage{ margin-top:34px; }
+  .spine{ width:30px; flex-shrink:0; position:relative; padding-top:2px; }
+  .spine .num{
+    font-family:'Fraunces', serif; font-style:italic; font-weight:500;
+    font-size:22px; color:var(--wax-dim); line-height:1; display:block;
+  }
+  .stage:not(:last-child) .spine::after{
+    content:""; position:absolute; top:34px; bottom:-34px; left:11px; width:1px; background:var(--line);
+  }
+  .stage-body{ flex:1; min-width:0; background:var(--panel); border:1px solid var(--line); }
+  .stage-head{
+    padding:16px 20px 14px; border-bottom:1px solid var(--line);
+    display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap;
+  }
+  .stage-head h2{ font-family:'Fraunces', serif; font-weight:600; font-size:17px; margin:0; }
+  .stage-hint{
+    font-family:'IBM Plex Mono', monospace; font-size:10.5px; letter-spacing:0.04em;
+    color:#a39c8c; text-transform:none;
+  }
+  .stage-inner{ padding:20px; }
+
   label{
     display:flex; align-items:baseline; justify-content:space-between;
-    font-family:'IBM Plex Mono', monospace; font-size:11px; letter-spacing:0.08em;
+    font-family:'IBM Plex Mono', monospace; font-size:10.5px; letter-spacing:0.08em;
     text-transform:uppercase; color:#7a756a; margin-bottom:10px;
   }
   label .req{ color:var(--wax); }
   textarea{
     width:100%; background:transparent; border:none; border-bottom:1px solid var(--line);
     padding:8px 0 10px; font-family:'Fraunces', serif; font-size:17px; color:var(--ink);
-    outline:none; resize:vertical; min-height:88px; line-height:1.5; transition:border-color .15s ease;
+    outline:none; resize:vertical; min-height:84px; line-height:1.5; transition:border-color .15s ease;
   }
   textarea:focus{ border-color:var(--moss); }
   textarea::placeholder{ color:#b7b0a2; }
@@ -1856,19 +1886,18 @@ ${FAVICON}
     outline:none; transition:border-color .15s ease;
   }
   select:focus{ border-color:var(--moss); }
-  .optionrow{ display:flex; gap:24px; flex-wrap:wrap; }
-  .optionrow > div{ flex:1; min-width:150px; }
+  .voicetype{ margin-top:20px; }
   .charcount{ text-align:right; font-family:'IBM Plex Mono', monospace; font-size:11px; color:#a39c8c; margin-top:6px; }
   .charcount.over{ color:var(--wax); }
 
   .dropzone{
-    border:1px dashed #cfc7b6; border-radius:2px; padding:20px; display:flex; align-items:center;
+    border:1px dashed #cfc7b6; border-radius:2px; padding:18px; display:flex; align-items:center;
     gap:14px; cursor:pointer; transition:border-color .15s ease, background .15s ease;
   }
   .dropzone:hover, .dropzone.drag{ border-color:var(--moss); background:#fbfaf6; }
   .dropzone .glyph{
-    width:38px; height:38px; border-radius:50%; border:1px solid var(--line);
-    display:flex; align-items:center; justify-content:center; flex-shrink:0; color:var(--moss); font-size:16px;
+    width:34px; height:34px; border-radius:50%; border:1px solid var(--line);
+    display:flex; align-items:center; justify-content:center; flex-shrink:0; color:var(--moss); font-size:15px;
   }
   .dropzone .text{ flex:1; min-width:0; }
   .dropzone .filename{
@@ -1885,67 +1914,68 @@ ${FAVICON}
   .promptline{ margin-top:12px; }
   .promptline input{ font-size:13.5px; }
   .promptline label{ margin-bottom:6px; }
-  .optional{ color:#a39c8c; font-weight:400; }
+  .optional{ color:#a39c8c; font-weight:400; text-transform:none; letter-spacing:0; }
 
-  .actions{ padding:24px; display:flex; flex-direction:column; gap:14px; }
   button.generate{
-    background:var(--ink); color:var(--paper); border:none; padding:16px 20px;
-    font-family:'IBM Plex Mono', monospace; font-size:13px; letter-spacing:0.1em; text-transform:uppercase;
+    width:100%; background:var(--ink); color:var(--paper); border:none; padding:15px 20px;
+    font-family:'IBM Plex Mono', monospace; font-size:12.5px; letter-spacing:0.1em; text-transform:uppercase;
     cursor:pointer; display:flex; align-items:center; justify-content:center; gap:10px; transition:background .15s ease;
   }
   button.generate:hover:not(:disabled){ background:var(--wax); }
   button.generate:disabled{ background:#cfc7b6; cursor:not-allowed; }
   .spinner{
-    width:13px; height:13px; border-radius:50%; border:2px solid rgba(247,244,238,0.35);
+    width:12px; height:12px; border-radius:50%; border:2px solid rgba(247,244,238,0.35);
     border-top-color:var(--paper); animation:spin .7s linear infinite; display:none;
   }
   .spinner.on{ display:inline-block; }
   @keyframes spin{ to{ transform:rotate(360deg); } }
   .status{
-    font-family:'IBM Plex Mono', monospace; font-size:12px; color:#7a756a;
-    min-height:16px; display:flex; align-items:center; gap:8px;
+    font-family:'IBM Plex Mono', monospace; font-size:11.5px; color:#7a756a;
+    min-height:16px; display:flex; align-items:center; gap:8px; margin-top:12px;
   }
   .status.err{ color:var(--wax); }
   .status.ok{ color:var(--moss); }
 
-  .output{ margin-top:28px; border:1px solid var(--line); background:var(--panel); padding:24px; display:none; }
+  /* ---- the result, styled as a torn take-slip rather than a card ---- */
+  .output{ position:relative; margin-top:22px; background:var(--paper); padding:22px 0 2px; display:none; }
   .output.show{ display:block; }
-  .output .eyebrow{ margin-bottom:16px; }
+  .output::before{
+    content:""; position:absolute; top:0; left:-20px; right:-20px; height:8px;
+    background-image:radial-gradient(circle at 8px 0, transparent 6.5px, var(--paper) 7px);
+    background-size:16px 8px; background-repeat:repeat-x; background-position:center top;
+  }
+  .output-head{
+    font-family:'IBM Plex Mono', monospace; font-size:11px; letter-spacing:0.08em; text-transform:uppercase;
+    color:#7a756a; margin-bottom:14px; padding-top:8px; border-top:1px dashed var(--line);
+  }
+  .output-head b{ color:var(--ink); font-weight:600; }
   audio{ width:100%; height:42px; }
-  .output-foot{ display:flex; justify-content:space-between; align-items:center; margin-top:16px; gap:12px; }
-  .meta{ font-family:'IBM Plex Mono', monospace; font-size:11.5px; color:#8f8879; }
+  .output-foot{ display:flex; justify-content:flex-end; margin-top:16px; }
   .download{
-    font-family:'IBM Plex Mono', monospace; font-size:12px; letter-spacing:0.06em; text-transform:uppercase;
+    font-family:'IBM Plex Mono', monospace; font-size:11.5px; letter-spacing:0.06em; text-transform:uppercase;
     color:var(--ink); text-decoration:none; border:1px solid var(--ink); padding:10px 18px;
     display:inline-flex; align-items:center; gap:8px; transition:all .15s ease; flex-shrink:0;
     background:none; cursor:pointer;
   }
   .download:hover{ background:var(--ink); color:var(--paper); }
   .download.disabled{ opacity:0.5; pointer-events:none; }
+
   footer{
-    text-align:center; margin-top:48px; font-family:'IBM Plex Mono', monospace;
+    text-align:center; margin-top:52px; font-family:'IBM Plex Mono', monospace;
     font-size:11px; color:#b7b0a2; letter-spacing:0.04em;
   }
   footer a{ color:#b7b0a2; text-decoration:underline; }
   footer .powered{ margin-top:6px; }
-  .top-actions{
-    position:absolute; top:24px; right:24px; z-index:2;
-    display:flex; align-items:flex-end; flex-direction:column; gap:8px;
-  }
-  .top-actions .btn{
-    background:var(--ink); color:var(--paper); font-family:'IBM Plex Mono', monospace;
-    font-size:10.5px; letter-spacing:0.06em; text-transform:uppercase; text-decoration:none;
-    padding:8px 14px; border-radius:3px; display:inline-flex; align-items:center; gap:6px;
-    box-shadow:var(--shadow); transition:background .15s ease; white-space:nowrap;
-  }
-  .top-actions .btn:hover{ background:var(--wax); }
+
   @media (max-width:520px){
-    .wrap{ padding:28px 16px 60px; }
-    header{ flex-direction:column; }
-    .row{ padding:18px 18px; }
-    .output-foot{ flex-direction:column; align-items:stretch; }
-    .download{ justify-content:center; }
-    .top-actions{ position:static; flex-direction:row; justify-content:flex-end; margin-bottom:16px; }
+    .wrap{ padding:22px 16px 60px; }
+    .head-row{ flex-direction:column; align-items:flex-start; gap:14px; }
+    .balance{ text-align:left; }
+    .stage-inner{ padding:18px; }
+    .stage{ gap:12px; }
+    .spine{ width:24px; }
+    .spine .num{ font-size:18px; }
+    .stage:not(:last-child) .spine::after{ left:9px; }
   }
 </style>
 </head>
@@ -1953,84 +1983,107 @@ ${FAVICON}
 
 <div class="wrap">
 
-  <div class="top-actions">
-    <a href="/plans" class="btn">🎫 Plans / Buy</a>
-    <a href="/profile" class="btn">👤 Profile</a>
-    <div id="adminLinkWrap"></div>
-  </div>
+  <nav class="masthead-nav">
+    <a href="/plans">Plans</a>
+    <a href="/profile">Profile</a>
+    <span id="adminLinkWrap"></span>
+  </nav>
 
   <header>
-    <div>
-      <div class="eyebrow"><span class="dot live"></span><span id="whoLabel">Ko Paing AI Voice Studio</span></div>
-      <h1>Voice Studio</h1>
-      <p class="sub">Type a line, hand it a short voice sample, and the studio speaks it back in that voice.</p>
-    </div>
-    <div>
-      <div class="credits-box">
-        <div class="num" id="creditsNum">–</div>
-        <div class="label">Credits</div>
+    <div class="eyebrow"><span class="dot live"></span><span id="whoLabel">Ko Paing AI Voice Studio</span></div>
+    <div class="head-row">
+      <div>
+        <h1>Voice Studio</h1>
+        <p class="sub">Type a line, hand it a short voice sample, and the studio speaks it back in that voice.</p>
+      </div>
+      <div class="balance">
+        <span class="balance-num" id="creditsNum">–</span>
+        <span class="balance-label">Credits</span>
       </div>
     </div>
   </header>
 
-  <div class="panel">
-    <div class="row">
-      <label for="textInput">Text to speak <span class="req">*</span></label>
-      <textarea id="textInput" placeholder="Write what you want the voice to say…"></textarea>
-      <div class="charcount"><span id="charLen">0</span> characters = <span id="charCost">0</span> credits</div>
-    </div>
+  <div class="reel">
 
-    <div class="row">
-      <label>Voice sample <span class="optional">(optional — for cloning)</span></label>
-      <div class="dropzone" id="dropzone">
-        <div class="glyph">♪</div>
-        <div class="text">
-          <div class="filename" id="fileNameLabel">Choose an audio file, or drop one here</div>
-          <div class="hint">WAV or MP3, a clean few seconds of one speaker works best</div>
+    <section class="stage">
+      <div class="spine"><span class="num">01</span></div>
+      <div class="stage-body">
+        <div class="stage-head">
+          <h2>Script</h2>
+          <span class="stage-hint">what the voice will say</span>
         </div>
-        <button class="clear" id="clearFile" type="button" title="Remove">&times;</button>
-      </div>
-      <input type="file" id="refAudioInput" accept="audio/*">
-
-      <div class="promptline" id="promptLine" style="display:none;">
-        <label for="promptText">What the sample says <span class="optional">(improves cloning)</span></label>
-        <input type="text" id="promptText" placeholder="Transcript of the voice sample…">
-      </div>
-    </div>
-
-    <div class="row optionrow">
-      <div>
-        <label for="voiceTypeSelect">Voice Type</label>
-        <select id="voiceTypeSelect">
-          <option value="female">အမျိုးသမီးအသံ (Female)</option>
-          <option value="male">အမျိုးသားအသံ (Male)</option>
-          <option value="multi">Multi Voice (Dialogue)</option>
-        </select>
-        <div id="multiVoiceHint" style="display:none; font-size:11.5px; color:#888; margin-top:6px; line-height:1.5;">
-          Line တစ်ကြောင်းချင်းစီရှေ့မှာ <b>M:</b> (အမျိုးသား) / <b>F:</b> (အမျိုးသမီး) / <b>C:</b> (ကလေး) ထည့်ပါ — ဥပမာ:<br>
-          <code>F: မင်္ဂလာပါ<br>M: ဟုတ်ကဲ့ ကူညီပေးပါမယ်<br>C: ကျွန်တော်လည်း ပါချင်တယ်</code>
+        <div class="stage-inner">
+          <label for="textInput">Text to speak <span class="req">*</span></label>
+          <textarea id="textInput" placeholder="Write what you want the voice to say…"></textarea>
+          <div class="charcount"><span id="charLen">0</span> characters = <span id="charCost">0</span> credits</div>
         </div>
       </div>
-    </div>
-  </div>
+    </section>
 
-  <div class="actions">
-    <button class="generate" id="generateBtn">
-      <span class="spinner" id="spinner"></span>
-      <span id="generateLabel">Generate speech</span>
-    </button>
-    <div class="status" id="statusLine"></div>
-  </div>
+    <section class="stage">
+      <div class="spine"><span class="num">02</span></div>
+      <div class="stage-body">
+        <div class="stage-head">
+          <h2>Voice</h2>
+          <span class="stage-hint optional">optional — add a sample to clone it</span>
+        </div>
+        <div class="stage-inner">
+          <div class="dropzone" id="dropzone">
+            <div class="glyph">♪</div>
+            <div class="text">
+              <div class="filename" id="fileNameLabel">Choose an audio file, or drop one here</div>
+              <div class="hint">WAV or MP3, a clean few seconds of one speaker works best</div>
+            </div>
+            <button class="clear" id="clearFile" type="button" title="Remove">&times;</button>
+          </div>
+          <input type="file" id="refAudioInput" accept="audio/*">
 
-  <div class="output" id="output">
-    <div class="eyebrow"><span class="dot live"></span>Result</div>
-    <audio id="audioPlayer" controls></audio>
-    <div class="output-foot">
-      <div class="meta" id="outputMeta">—</div>
-      <div style="display:flex; gap:10px; flex-wrap:wrap;">
-        <button class="download" id="sendTelegramBtn" type="button">📩 Telegram ကို ပို့ပါ</button>
+          <div class="promptline" id="promptLine" style="display:none;">
+            <label for="promptText">What the sample says <span class="optional">(improves cloning)</span></label>
+            <input type="text" id="promptText" placeholder="Transcript of the voice sample…">
+          </div>
+
+          <div class="voicetype">
+            <label for="voiceTypeSelect">Voice type</label>
+            <select id="voiceTypeSelect">
+              <option value="female">အမျိုးသမီးအသံ (Female)</option>
+              <option value="male">အမျိုးသားအသံ (Male)</option>
+              <option value="multi">Multi Voice (Dialogue)</option>
+            </select>
+            <div id="multiVoiceHint" style="display:none; font-size:11.5px; color:#888; margin-top:6px; line-height:1.5;">
+              Line တစ်ကြောင်းချင်းစီရှေ့မှာ <b>M:</b> (အမျိုးသား) / <b>F:</b> (အမျိုးသမီး) / <b>C:</b> (ကလေး) ထည့်ပါ — ဥပမာ:<br>
+              <code>F: မင်္ဂလာပါ<br>M: ဟုတ်ကဲ့ ကူညီပေးပါမယ်<br>C: ကျွန်တော်လည်း ပါချင်တယ်</code>
+            </div>
+          </div>
+        </div>
       </div>
-    </div>
+    </section>
+
+    <section class="stage">
+      <div class="spine"><span class="num">03</span></div>
+      <div class="stage-body">
+        <div class="stage-head">
+          <h2>Render</h2>
+          <span class="stage-hint">generate and preview the take</span>
+        </div>
+        <div class="stage-inner">
+          <button class="generate" id="generateBtn">
+            <span class="spinner" id="spinner"></span>
+            <span id="generateLabel">Generate speech</span>
+          </button>
+          <div class="status" id="statusLine"></div>
+
+          <div class="output" id="output">
+            <div class="output-head">Take rendered — <b id="outputMeta">—</b></div>
+            <audio id="audioPlayer" controls></audio>
+            <div class="output-foot">
+              <button class="download" id="sendTelegramBtn" type="button">Telegram ကို ပို့ပါ</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
   </div>
 
   <footer>
@@ -2090,7 +2143,7 @@ ${FAVICON}
   } else {
     whoLabelEl.textContent = 'Hi, ' + (tgUser.first_name || tgUser.username || 'there') + '!';
     if (tgUser.isAdmin) {
-      $('adminLinkWrap').innerHTML = '<a href="/admin" class="btn">🛠 Admin Panel</a>';
+      $('adminLinkWrap').innerHTML = '<a href="/admin">Admin</a>';
     }
     loadCredits();
   }
