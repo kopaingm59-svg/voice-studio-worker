@@ -1,5 +1,10 @@
-const ADMIN_TELEGRAM_USERNAME = 'kopaing209';  
-const TELEGRAM_BOT_USERNAME = 'kopaingvcabot';  
+// ===========================================================================
+// Cloudflare Worker - Ko Paing AI Voice Studio (Backend + Frontend)
+// (D1 Database Edition - Firebase removed)
+// ===========================================================================
+
+const ADMIN_TELEGRAM_USERNAME = 'kopaing209'; // @ မထည့်ပါနှင့်
+const TELEGRAM_BOT_USERNAME = 'kopaingvcabot'; // Referral link (t.me/<username>?startapp=CODE) တည်ဆောက်ဖို့ Bot Username ကို ဒီမှာပြောင်းထည့်ပါ — @ မထည့်ပါနှင့်
 
 export default {
   async fetch(request, env, ctx) {
@@ -763,7 +768,7 @@ async function handleAdminPurchaseReview(request, env, corsHeaders) {
 
 async function handleGenerateStart(request, env, corsHeaders) {
   const body = await request.json();
-  const { userId, text, refAudioBase64, promptText, controlInstruction, style, voiceType } = body;
+  const { userId, text, refAudioBase64, promptText, voiceType } = body;
 
   if (!userId) {
     return json({ error: 'Missing userId' }, 400, corsHeaders);
@@ -795,12 +800,6 @@ async function handleGenerateStart(request, env, corsHeaders) {
     input.reference_audio_base64 = refAudioBase64;
     if (promptText && promptText.trim()) input.prompt_text = promptText.trim();
   }
-  // Speech Pace (Slow/Fast) - VoxCPM2 ရဲ့ Control Instruction (natural language) field ကနေတဆင့်
-  // ပို့ပေးသည် (numeric speed parameter ကို VoxCPM2 က support မလုပ်ပါ)
-  if (controlInstruction && controlInstruction.trim()) {
-    input.control_instruction = controlInstruction.trim();
-  }
-  if (style) input.style = style;
   if (voiceType) input.voice_type = voiceType;
 
   const runRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/run`, {
@@ -974,7 +973,7 @@ async function handleApiKeyRevoke(request, env, corsHeaders) {
 
 async function handleApiV1Generate(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
-  const { apiKey, text, refAudioBase64, promptText, controlInstruction, style, voiceType } = body;
+  const { apiKey, text, refAudioBase64, promptText, voiceType } = body;
 
   if (!apiKey) {
     return json({ error: 'Missing apiKey' }, 401, corsHeaders);
@@ -1013,8 +1012,6 @@ async function handleApiV1Generate(request, env, corsHeaders) {
     input.reference_audio_base64 = refAudioBase64;
     if (promptText && promptText.trim()) input.prompt_text = promptText.trim();
   }
-  if (controlInstruction && controlInstruction.trim()) input.control_instruction = controlInstruction.trim();
-  if (style) input.style = style;
   if (voiceType) input.voice_type = voiceType;
 
   const runRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/run`, {
@@ -2001,34 +1998,18 @@ ${FAVICON}
       </div>
     </div>
 
-    <div class="row">
-      <label for="paceSelect">Speech Pace</label>
-      <select id="paceSelect">
-        <option value="normal">Normal</option>
-        <option value="slow">Slow</option>
-        <option value="fast">Fast</option>
-      </select>
-    </div>
-
     <div class="row optionrow">
-      <div>
-        <label for="styleSelect">Speaking Style</label>
-        <select id="styleSelect">
-          <option value="normal">Normal</option>
-          <option value="happy">Happy</option>
-          <option value="sad">Sad</option>
-          <option value="news">News</option>
-          <option value="audiobook">Audio Book</option>
-          <option value="calm">Calm</option>
-        </select>
-      </div>
       <div>
         <label for="voiceTypeSelect">Voice Type</label>
         <select id="voiceTypeSelect">
           <option value="female">အမျိုးသမီးအသံ (Female)</option>
           <option value="male">အမျိုးသားအသံ (Male)</option>
-          <option value="multi">Multi Voice</option>
+          <option value="multi">Multi Voice (Dialogue)</option>
         </select>
+        <div id="multiVoiceHint" style="display:none; font-size:11.5px; color:#888; margin-top:6px; line-height:1.5;">
+          Line တစ်ကြောင်းချင်းစီရှေ့မှာ <b>M:</b> (အမျိုးသား) / <b>F:</b> (အမျိုးသမီး) / <b>C:</b> (ကလေး) ထည့်ပါ — ဥပမာ:<br>
+          <code>F: မင်္ဂလာပါ<br>M: ဟုတ်ကဲ့ ကူညီပေးပါမယ်<br>C: ကျွန်တော်လည်း ပါချင်တယ်</code>
+        </div>
       </div>
     </div>
   </div>
@@ -2089,9 +2070,12 @@ ${FAVICON}
   const outputMeta     = $('outputMeta');
   const sendTelegramBtn = $('sendTelegramBtn');
 
-  const paceSelect    = $('paceSelect');
-  const styleSelect   = $('styleSelect');
   const voiceTypeSelect = $('voiceTypeSelect');
+  const multiVoiceHint = $('multiVoiceHint');
+
+  voiceTypeSelect.addEventListener('change', () => {
+    multiVoiceHint.style.display = voiceTypeSelect.value === 'multi' ? 'block' : 'none';
+  });
 
   let refAudioBase64 = null;
   let currentCredits = 0;
@@ -2195,12 +2179,6 @@ ${FAVICON}
     setBusy(true);
     setStatus('Sending request…');
 
-    const paceInstructions = {
-      slow: 'Speaks slowly.',
-      fast: 'Speaks quickly, at a fast pace.'
-    };
-    const controlInstruction = paceInstructions[paceSelect.value] || undefined;
-
     try {
       const startRes = await fetch('/api/generate', {
         method:'POST',
@@ -2210,8 +2188,6 @@ ${FAVICON}
           text,
           refAudioBase64: refAudioBase64 || undefined,
           promptText: promptTextEl.value.trim() || undefined,
-          controlInstruction,
-          style: styleSelect.value,
           voiceType: voiceTypeSelect.value
         })
       });
@@ -2673,19 +2649,27 @@ function getProfileHtml() {
         <div class="card">
           <h3>API Key</h3>
           <p style="font-size:12.5px; color:#666; margin-top:0;">သင့် website / App ကနေ တိုက်ရိုက် Voice Generate ခေါ်သုံးနိုင်ဖို့ API Key လိုအပ်ပါသည်။</p>
-          \${u.hasApiKey ? \`
-            <div class="code-box"><code>\${u.apiKeyPrefix}</code><span style="font-size:11px; color:#999;">Active</span></div>
-            <div class="row2" style="margin-top:10px;">
-              <button class="btn ghost" onclick="generateApiKey()">Regenerate</button>
-              <button class="btn danger" onclick="revokeApiKey()">Revoke</button>
-            </div>
-          \` : \`
-            <button class="btn" onclick="generateApiKey()">Generate API Key</button>
-          \`}
+          <div id="apiKeyButtons"></div>
           <div id="apiKeyResult"></div>
           <div class="msg" id="apiKeyMsg"></div>
           <div style="margin-top:12px;"><a href="/api-docs" class="back">📄 View API Documentation →</a></div>
         </div>
+      \`;
+
+      renderApiKeyButtons();
+    }
+
+    function renderApiKeyButtons() {
+      const u = profileData;
+      const box = document.getElementById('apiKeyButtons');
+      box.innerHTML = u.hasApiKey ? \`
+        <div class="code-box"><code>\${u.apiKeyPrefix}</code><span style="font-size:11px; color:#999;">Active</span></div>
+        <div class="row2" style="margin-top:10px;">
+          <button class="btn ghost" onclick="generateApiKey()">Regenerate</button>
+          <button class="btn danger" onclick="revokeApiKey()">Revoke</button>
+        </div>
+      \` : \`
+        <button class="btn" onclick="generateApiKey()">Generate API Key</button>
       \`;
     }
 
@@ -2703,6 +2687,9 @@ function getProfileHtml() {
       });
     }
 
+    let lastGeneratedApiKey = null;
+    function copyGeneratedApiKey() { copyText(lastGeneratedApiKey); }
+
     async function generateApiKey() {
       const msg = document.getElementById('apiKeyMsg');
       const resultBox = document.getElementById('apiKeyResult');
@@ -2714,8 +2701,15 @@ function getProfileHtml() {
         });
         const data = await res.json();
         if (res.ok && data.success) {
-          resultBox.innerHTML = '<div class="apikey-plain">' + data.apiKey + '</div><div class="warn">⚠️ ဒီ Key ကို ဒီတစ်ကြိမ်တည်းသာ ပြသပါမည် — ကူးယူ၍ လုံခြုံစွာသိမ်းထားပါ။</div>';
-          await loadProfile();
+          lastGeneratedApiKey = data.apiKey;
+          resultBox.innerHTML = \`
+            <div class="apikey-plain">\${data.apiKey}</div>
+            <button class="btn small ghost" style="margin-top:8px;" onclick="copyGeneratedApiKey()">📋 Copy API Key</button>
+            <div class="warn">⚠️ ဒီ Key ကို ဒီတစ်ကြိမ်တည်းသာ ပြသပါမည် — ကူးယူ၍ လုံခြုံစွာသိမ်းထားပါ။</div>
+          \`;
+          profileData.hasApiKey = true;
+          profileData.apiKeyPrefix = data.apiKeyPrefix;
+          renderApiKeyButtons();
         } else {
           msg.textContent = data.error || 'Failed';
           msg.className = 'msg err';
@@ -2728,15 +2722,23 @@ function getProfileHtml() {
 
     async function revokeApiKey() {
       if (!confirm('API Key ကို ပယ်ဖျက်မှာ သေချာပါသလား? ဒီ Key နဲ့ ချိတ်ဆက်ထားတဲ့ App/Website များ အလုပ်လုပ်တော့မည် မဟုတ်ပါ။')) return;
-      const { ok, data } = await (async () => {
+      try {
         const res = await fetch('/api/profile/api-key/revoke', {
           method: 'POST', headers: {'Content-Type':'application/json'},
           body: JSON.stringify({ userId: tgUser.id })
         });
-        return { ok: res.ok, data: await res.json() };
-      })();
-      if (ok && data.success) await loadProfile();
-      else alert(data.error || 'Failed');
+        const data = await res.json();
+        if (res.ok && data.success) {
+          profileData.hasApiKey = false;
+          profileData.apiKeyPrefix = null;
+          document.getElementById('apiKeyResult').innerHTML = '';
+          renderApiKeyButtons();
+        } else {
+          alert(data.error || 'Failed');
+        }
+      } catch (err) {
+        alert('Network error');
+      }
     }
   </script>
 </body>
@@ -2795,8 +2797,7 @@ function getApiDocsHtml() {
   <p>ဒီ API ကို သင့် website သို့မဟုတ် App (Android/iOS/Web) ကနေ တိုက်ရိုက် ခေါ်သုံးနိုင်ပါတယ်။ Authenticate လုပ်ဖို့ Profile page ကနေ ရယူထားတဲ့ <strong>API Key</strong> လိုအပ်ပါသည်။</p>
 
   <h2>Base URL</h2>
-  <pre>https://YOUR-WORKER-DOMAIN</pre>
-  <p style="font-size:12px; color:#888;">(သင့် Cloudflare Worker ရဲ့ actual domain ကို အစားထိုးပါ)</p>
+  <pre>https://voice-studio-worker.kopaingm61.workers.dev</pre>
 
   <h2>Authentication</h2>
   <p>Request body ထဲမှာ <code>apiKey</code> field ပါ ထည့်ပေးပါ။ Key ကို Profile page → API Key → Generate ကနေ ရယူနိုင်ပါတယ်။ Key ကို ဒီတစ်ကြိမ်တည်းသာ ပြသမည်ဖြစ်၍ လုံခြုံစွာ သိမ်းထားပါ။</p>
@@ -2813,8 +2814,6 @@ function getApiDocsHtml() {
   "text": "မင်္ဂလာပါ",
   "refAudioBase64": "",        // Optional - voice cloning
   "promptText": "",            // Optional - reference audio ရဲ့ transcript
-  "controlInstruction": "",    // Optional - e.g. "Speaks slowly."
-  "style": "",                 // Optional - e.g. "happy", "news", "calm"
   "voiceType": ""              // Optional - "female" | "male"
 }</pre>
 
@@ -2824,8 +2823,6 @@ function getApiDocsHtml() {
     <tr><td>text</td><td>string</td><td>Yes</td><td>ထွက်လိုတဲ့ စာသား</td></tr>
     <tr><td>refAudioBase64</td><td>string</td><td>No</td><td>Voice cloning အတွက် reference audio (base64 WAV)</td></tr>
     <tr><td>promptText</td><td>string</td><td>No</td><td>reference audio ထဲက စာသား (cloning quality တိုးစေသည်)</td></tr>
-    <tr><td>controlInstruction</td><td>string</td><td>No</td><td>Pace instruction, e.g. "Speaks slowly."</td></tr>
-    <tr><td>style</td><td>string</td><td>No</td><td>Mood/style tag</td></tr>
     <tr><td>voiceType</td><td>string</td><td>No</td><td>"female" or "male" (reference audio မပါရင်သာ အလုပ်လုပ်သည်)</td></tr>
   </table>
 
@@ -2874,12 +2871,12 @@ function getApiDocsHtml() {
 }</pre>
 
   <h2>Example — cURL</h2>
-  <pre>curl -X POST https://YOUR-WORKER-DOMAIN/api/v1/generate \\
+  <pre>curl -X POST https://voice-studio-worker.kopaingm61.workers.dev/api/v1/generate \\
   -H "Content-Type: application/json" \\
   -d '{"apiKey":"kpv_xxxxxxxxxxxxxxxx","text":"မင်္ဂလာပါ"}'</pre>
 
   <h2>Example — JavaScript (fetch)</h2>
-  <pre>const res = await fetch('https://YOUR-WORKER-DOMAIN/api/v1/generate', {
+  <pre>const res = await fetch('https://voice-studio-worker.kopaingm61.workers.dev/api/v1/generate', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ apiKey: 'kpv_xxxxxxxxxxxxxxxx', text: 'မင်္ဂလာပါ' })
