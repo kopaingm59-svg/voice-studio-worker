@@ -134,6 +134,9 @@ export default {
       if (url.pathname === '/api/admin/users/credits' && request.method === 'POST') {
         return await handleAdminAdjustCredits(request, env, corsHeaders);
       }
+      if (url.pathname === '/api/admin/requests/list' && request.method === 'POST') {
+        return await handleAdminRequestsList(request, env, corsHeaders);
+      }
 
       // ---- Admin: Purchase Approvals --------------------------------------
       if (url.pathname === '/api/admin/purchases/list' && request.method === 'POST') {
@@ -146,6 +149,9 @@ export default {
       // ---- Profile / Referral / API Key -----------------------------------
       if (url.pathname === '/api/profile/get' && request.method === 'POST') {
         return await handleProfileGet(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/profile/requests' && request.method === 'POST') {
+        return await handleProfileRequestsList(request, env, corsHeaders);
       }
       if (url.pathname === '/api/profile/api-key/generate' && request.method === 'POST') {
         return await handleApiKeyGenerate(request, env, corsHeaders);
@@ -228,6 +234,35 @@ async function setSetting(env, key, value) {
 
 function requireAdmin(env, token) {
   return !!token && token === env.SESSION_SECRET;
+}
+
+// ---- Request logs: tracks each generate call so users/admins can see
+// exactly what happened to a request (queued/completed/failed, credits used) ----
+
+async function logRequestStart(env, { userId, jobId, source, textLength }) {
+  try {
+    await env.DB.prepare(
+      `INSERT INTO request_logs (user_id, job_id, source, text_length, status, credits_charged, created_at, updated_at)
+       VALUES (?1, ?2, ?3, ?4, 'IN_QUEUE', 0, datetime('now'), datetime('now'))`
+    )
+      .bind(String(userId), String(jobId), source, Number(textLength) || 0)
+      .run();
+  } catch (e) {
+    // request_logs table မရှိသေးရင်တောင် voice generation ကို ဆက်လက် အလုပ်လုပ်စေရန် (မထိခိုက်ရန်)
+    console.error('logRequestStart failed', e);
+  }
+}
+
+async function logRequestUpdate(env, jobId, { status, creditsCharged, errorMessage }) {
+  try {
+    await env.DB.prepare(
+      `UPDATE request_logs SET status = ?1, credits_charged = ?2, error_message = ?3, updated_at = datetime('now') WHERE job_id = ?4`
+    )
+      .bind(status, Number(creditsCharged) || 0, errorMessage || null, String(jobId))
+      .run();
+  } catch (e) {
+    console.error('logRequestUpdate failed', e);
+  }
 }
 
 // ---- Referral code + API key helpers --------------------------------------
@@ -476,6 +511,39 @@ async function handleAdminAdjustCredits(request, env, corsHeaders) {
     .run();
 
   return json({ success: true, credits: newCredits }, 200, corsHeaders);
+}
+
+// ---- Admin: Request logs (view any/all users' generate history) -----------
+
+async function handleAdminRequestsList(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { token, userId } = body;
+
+  if (!requireAdmin(env, token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+
+  try {
+    let query, binding;
+    if (userId) {
+      query = `SELECT r.job_id, r.user_id, r.source, r.text_length, r.status, r.credits_charged, r.error_message, r.created_at,
+                      u.name as user_name, u.username as user_username
+               FROM request_logs r LEFT JOIN users u ON u.id = r.user_id
+               WHERE r.user_id = ?1 ORDER BY r.created_at DESC LIMIT 200`;
+      binding = String(userId);
+    } else {
+      query = `SELECT r.job_id, r.user_id, r.source, r.text_length, r.status, r.credits_charged, r.error_message, r.created_at,
+                      u.name as user_name, u.username as user_username
+               FROM request_logs r LEFT JOIN users u ON u.id = r.user_id
+               ORDER BY r.created_at DESC LIMIT 200`;
+    }
+    const stmt = binding ? env.DB.prepare(query).bind(binding) : env.DB.prepare(query);
+    const { results } = await stmt.all();
+
+    return json({ success: true, requests: results }, 200, corsHeaders);
+  } catch (e) {
+    return json({ error: 'request_logs table မရှိသေးပါ — အောက်က migration SQL ကို D1 database မှာ run ပေးပါ' }, 500, corsHeaders);
+  }
 }
 
 // ---- Plans: Public ---------------------------------------------------------
@@ -856,6 +924,8 @@ async function handleGenerateStart(request, env, corsHeaders) {
   // Credits ကို job အောင်မြင်စွာ ပြီးမြောက်မှသာ နုတ်ပါမည် (handleGenerateStatus ထဲမှာ)
   // — user တစ်ယောက် job မအောင်မြင်ခဲ့ရင် ဘာမှ ဆုံးရှုံးမှု မရှိစေရန်
 
+  await logRequestStart(env, { userId, jobId: runData.id, source: 'miniapp', textLength: cost });
+
   return json(
     { success: true, jobId: runData.id, cost, remainingCredits: currentCredits },
     200,
@@ -886,6 +956,13 @@ async function handleGenerateStatus(request, env, corsHeaders) {
     )
       .bind(Number(cost), String(userId))
       .run();
+    await logRequestUpdate(env, jobId, { status: 'COMPLETED', creditsCharged: cost, errorMessage: null });
+  } else if (data.status === 'FAILED') {
+    await logRequestUpdate(env, jobId, { status: 'FAILED', creditsCharged: 0, errorMessage: data.error || 'RunPod ကနေ error ပြန်ခဲ့သည်' });
+  } else if (data.status === 'CANCELLED') {
+    await logRequestUpdate(env, jobId, { status: 'CANCELLED', creditsCharged: 0, errorMessage: null });
+  } else if (data.status === 'IN_PROGRESS') {
+    await logRequestUpdate(env, jobId, { status: 'IN_PROGRESS', creditsCharged: 0, errorMessage: null });
   }
 
   return json(data, 200, corsHeaders);
@@ -953,6 +1030,31 @@ async function handleProfileGet(request, env, corsHeaders) {
     200,
     corsHeaders
   );
+}
+
+// ---- Request history: user ကိုယ်တိုင် သူ့ရဲ့ request log များကို ကြည့်ရန် ----
+
+async function handleProfileRequestsList(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { userId } = body;
+
+  if (!userId) {
+    return json({ error: 'Missing userId' }, 400, corsHeaders);
+  }
+
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT job_id, source, text_length, status, credits_charged, error_message, created_at
+       FROM request_logs WHERE user_id = ?1 ORDER BY created_at DESC LIMIT 50`
+    )
+      .bind(String(userId))
+      .all();
+
+    return json({ success: true, requests: results }, 200, corsHeaders);
+  } catch (e) {
+    // request_logs table မရှိသေးရင် empty list ပြန်ပေးမည် (feature ကို gracefully skip)
+    return json({ success: true, requests: [] }, 200, corsHeaders);
+  }
 }
 
 async function handleApiKeyGenerate(request, env, corsHeaders) {
@@ -1063,6 +1165,8 @@ async function handleApiV1Generate(request, env, corsHeaders) {
 
   // Credits ကို job အောင်မြင်စွာ ပြီးမြောက်မှသာ နုတ်ပါမည် (handleApiV1GenerateStatus ထဲမှာ)
 
+  await logRequestStart(env, { userId: user.id, jobId: runData.id, source: 'api', textLength: cost });
+
   return json(
     { success: true, jobId: runData.id, cost, remainingCredits: currentCredits },
     200,
@@ -1102,6 +1206,13 @@ async function handleApiV1GenerateStatus(request, env, corsHeaders) {
     )
       .bind(Number(cost), user.id)
       .run();
+    await logRequestUpdate(env, jobId, { status: 'COMPLETED', creditsCharged: cost, errorMessage: null });
+  } else if (data.status === 'FAILED') {
+    await logRequestUpdate(env, jobId, { status: 'FAILED', creditsCharged: 0, errorMessage: data.error || 'RunPod ကနေ error ပြန်ခဲ့သည်' });
+  } else if (data.status === 'CANCELLED') {
+    await logRequestUpdate(env, jobId, { status: 'CANCELLED', creditsCharged: 0, errorMessage: null });
+  } else if (data.status === 'IN_PROGRESS') {
+    await logRequestUpdate(env, jobId, { status: 'IN_PROGRESS', creditsCharged: 0, errorMessage: null });
   }
 
   return json(data, 200, corsHeaders);
@@ -1498,12 +1609,14 @@ function getAdminDashboardHtml() {
 
   <div class="tabs" style="margin-top:16px;">
     <div class="tab active" data-tab="users">Users</div>
+    <div class="tab" data-tab="requests">Requests</div>
     <div class="tab" data-tab="plans">Plans</div>
     <div class="tab" data-tab="settings">Settings</div>
     <div class="tab" data-tab="purchases">Purchases</div>
   </div>
 
   <div class="panel active" id="panel-users"><div class="empty">Loading…</div></div>
+  <div class="panel" id="panel-requests"></div>
   <div class="panel" id="panel-plans"></div>
   <div class="panel" id="panel-settings"></div>
   <div class="panel" id="panel-purchases"><div class="empty">Loading…</div></div>
@@ -1521,6 +1634,7 @@ function getAdminDashboardHtml() {
         if (tab.dataset.tab === 'plans') loadPlans();
         if (tab.dataset.tab === 'settings') loadSettings();
         if (tab.dataset.tab === 'purchases') loadPurchases();
+        if (tab.dataset.tab === 'requests') loadRequestsPanel();
       });
     });
 
@@ -1557,6 +1671,7 @@ function getAdminDashboardHtml() {
           <td style="white-space:nowrap;">
             <input type="number" id="creditAmt-\${u.id}" placeholder="±amount" style="width:90px; padding:6px 8px; font-size:12px; border:1px solid #ccc; border-radius:4px; margin-right:4px;">
             <button class="btn small ghost" onclick="adjustCredits('\${u.id}')">Add Credits</button>
+            <button class="btn small ghost" onclick="viewUserRequests('\${u.id}')">Requests</button>
             <button class="btn small \${u.is_banned ? 'ghost' : 'danger'}" onclick="toggleBan('\${u.id}', \${u.is_banned ? 0 : 1})">\${u.is_banned ? 'Unban' : 'Ban'}</button>
           </td>
         </tr>
@@ -1581,6 +1696,87 @@ function getAdminDashboardHtml() {
       } else {
         alert(data.error || 'Failed');
       }
+    }
+
+    // ---------------- REQUESTS ----------------
+    let pendingRequestsFilter = '';
+
+    function viewUserRequests(userId) {
+      pendingRequestsFilter = userId;
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+      const tab = document.querySelector('.tab[data-tab="requests"]');
+      tab.classList.add('active');
+      document.getElementById('panel-requests').classList.add('active');
+      loadRequestsPanel();
+    }
+
+    function requestStatusBadge(status) {
+      const map = {
+        COMPLETED: ['badge', '#1a7a44', 'Completed'],
+        FAILED: ['badge', '#c0392b', 'Failed'],
+        CANCELLED: ['badge', '#888', 'Cancelled'],
+        IN_PROGRESS: ['badge', '#a17a1c', 'In Progress'],
+        IN_QUEUE: ['badge', '#a17a1c', 'Queued'],
+      };
+      const [cls, color, label] = map[status] || ['badge', '#888', status || 'Unknown'];
+      return '<span class="' + cls + '" style="background:' + color + ';">' + label + '</span>';
+    }
+
+    async function loadRequestsPanel() {
+      const wrap = document.getElementById('panel-requests');
+      wrap.innerHTML = \`
+        <div class="card">
+          <h3>Filter</h3>
+          <div class="row2">
+            <div class="field" style="margin-bottom:0;">
+              <label>User ID (blank = all users)</label>
+              <input id="reqFilterUserId" value="\${pendingRequestsFilter}" placeholder="Telegram User ID">
+            </div>
+          </div>
+          <button class="btn small" style="margin-top:10px;" onclick="applyRequestsFilter()">Search</button>
+          <button class="btn small ghost" style="margin-top:10px;" onclick="clearRequestsFilter()">Clear</button>
+        </div>
+        <div id="requestsTableWrap"><div class="empty">Loading…</div></div>
+      \`;
+      await fetchAndRenderRequests();
+    }
+
+    function applyRequestsFilter() {
+      pendingRequestsFilter = document.getElementById('reqFilterUserId').value.trim();
+      fetchAndRenderRequests();
+    }
+
+    function clearRequestsFilter() {
+      pendingRequestsFilter = '';
+      document.getElementById('reqFilterUserId').value = '';
+      fetchAndRenderRequests();
+    }
+
+    async function fetchAndRenderRequests() {
+      const wrap = document.getElementById('requestsTableWrap');
+      wrap.innerHTML = '<div class="empty">Loading…</div>';
+      const { ok, data } = await api('/api/admin/requests/list', pendingRequestsFilter ? { userId: pendingRequestsFilter } : {});
+      if (!ok || !data.success) {
+        wrap.innerHTML = '<div class="error">' + (data.error || 'Failed to load requests') + '</div>';
+        return;
+      }
+      if (!data.requests.length) {
+        wrap.innerHTML = '<div class="empty">Request မတွေ့ပါ</div>';
+        return;
+      }
+      const rows = data.requests.map(r => \`
+        <tr>
+          <td>\${r.user_name || '-'}\${r.user_username ? ' (@' + r.user_username + ')' : ''}<br><span style="color:#999;">\${r.user_id}</span></td>
+          <td>\${r.source === 'api' ? 'Public API' : 'Voice Studio'}</td>
+          <td>\${r.text_length}</td>
+          <td>\${requestStatusBadge(r.status)}</td>
+          <td>\${r.credits_charged}</td>
+          <td style="max-width:200px; white-space:normal; color:#c0392b;">\${r.error_message || '-'}</td>
+          <td>\${new Date(r.created_at + 'Z').toLocaleString()}</td>
+        </tr>
+      \`).join('');
+      wrap.innerHTML = \`<table><thead><tr><th>User</th><th>Source</th><th>Chars</th><th>Status</th><th>Credits Used</th><th>Error</th><th>Time</th></tr></thead><tbody>\${rows}</tbody></table>\`;
     }
 
     // ---------------- PLANS ----------------
@@ -2676,6 +2872,23 @@ function getProfileHtml() {
     }
     .warn { font-size: 11.5px; color: #b5482f; margin-top: 6px; }
     .empty { text-align: center; color: #999; padding: 30px 10px; }
+    .req-list { display: flex; flex-direction: column; gap: 8px; }
+    .req-item {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      background: #f7f6f0; border-radius: 6px; padding: 10px 12px;
+    }
+    .req-item .req-main { min-width: 0; }
+    .req-item .req-text { font-size: 12.5px; color: #333; }
+    .req-item .req-meta { font-size: 11px; color: #999; margin-top: 2px; }
+    .req-badge {
+      flex-shrink: 0; font-size: 10px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase;
+      padding: 3px 9px; border-radius: 10px; white-space: nowrap;
+    }
+    .req-badge.completed { background: #eaf7ee; color: #1a7a44; }
+    .req-badge.failed { background: #fdeceb; color: #c0392b; }
+    .req-badge.cancelled { background: #f0f0ee; color: #888; }
+    .req-badge.pending { background: #fff6e0; color: #a17a1c; }
+    .req-err { font-size: 11px; color: #c0392b; margin-top: 3px; }
   </style>
 </head>
 <body>
@@ -2754,9 +2967,16 @@ function getProfileHtml() {
           <div class="msg" id="apiKeyMsg"></div>
           <div style="margin-top:12px;"><a href="/api-docs" class="back">📄 View API Documentation →</a></div>
         </div>
+
+        <div class="card">
+          <h3>Request History</h3>
+          <p style="font-size:12.5px; color:#666; margin-top:0;">Voice generate request တစ်ခုချင်းစီရဲ့ status (Completed/Failed/Cancelled) နဲ့ ဘယ်လောက် credits သုံးခဲ့လဲ ဒီနေရာမှာ ကြည့်နိုင်ပါသည်။</p>
+          <div id="requestsBox"><div class="empty">Loading…</div></div>
+        </div>
       \`;
 
       renderApiKeyButtons();
+      loadRequests();
     }
 
     function renderApiKeyButtons() {
@@ -2775,6 +2995,49 @@ function getProfileHtml() {
 
     function u_referralCode() { return (profileData && profileData.referralCode) || ''; }
     function u_referralLink() { return (profileData && profileData.referralLink) || ''; }
+
+    function statusBadge(status) {
+      const map = {
+        COMPLETED: ['completed', 'Completed'],
+        FAILED: ['failed', 'Failed'],
+        CANCELLED: ['cancelled', 'Cancelled'],
+        IN_PROGRESS: ['pending', 'In Progress'],
+        IN_QUEUE: ['pending', 'Queued'],
+      };
+      const [cls, label] = map[status] || ['pending', status || 'Unknown'];
+      return '<span class="req-badge ' + cls + '">' + label + '</span>';
+    }
+
+    async function loadRequests() {
+      const box = document.getElementById('requestsBox');
+      try {
+        const res = await fetch('/api/profile/requests', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ userId: tgUser.id })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          box.innerHTML = '<div class="empty">' + (data.error || 'Failed to load requests') + '</div>';
+          return;
+        }
+        if (!data.requests.length) {
+          box.innerHTML = '<div class="empty">Request မရှိသေးပါ</div>';
+          return;
+        }
+        box.innerHTML = '<div class="req-list">' + data.requests.map(r => \`
+          <div class="req-item">
+            <div class="req-main">
+              <div class="req-text">\${r.text_length} characters\${r.credits_charged ? ' · ' + r.credits_charged + ' credits သုံးပြီး' : ''}</div>
+              <div class="req-meta">\${r.source === 'api' ? 'Public API' : 'Voice Studio'} · \${new Date(r.created_at + 'Z').toLocaleString()}</div>
+              \${r.error_message ? '<div class="req-err">' + r.error_message + '</div>' : ''}
+            </div>
+            \${statusBadge(r.status)}
+          </div>
+        \`).join('') + '</div>';
+      } catch (err) {
+        box.innerHTML = '<div class="empty">Network error</div>';
+      }
+    }
 
     function copyText(text) {
       if (!text) return;
