@@ -131,6 +131,9 @@ export default {
       if (url.pathname === '/api/admin/users/ban' && request.method === 'POST') {
         return await handleAdminBanUser(request, env, corsHeaders);
       }
+      if (url.pathname === '/api/admin/users/credits' && request.method === 'POST') {
+        return await handleAdminAdjustCredits(request, env, corsHeaders);
+      }
 
       // ---- Admin: Purchase Approvals --------------------------------------
       if (url.pathname === '/api/admin/purchases/list' && request.method === 'POST') {
@@ -439,6 +442,40 @@ async function handleAdminBanUser(request, env, corsHeaders) {
     .run();
 
   return json({ success: true }, 200, corsHeaders);
+}
+
+// ---- Admin: Adjust a single user's credits (top-up) -----------------------
+
+async function handleAdminAdjustCredits(request, env, corsHeaders) {
+  const body = await request.json();
+  const { token, userId, amount } = body;
+
+  if (!requireAdmin(env, token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  if (!userId) {
+    return json({ error: 'Missing userId' }, 400, corsHeaders);
+  }
+  const delta = Number(amount);
+  if (!Number.isFinite(delta) || delta === 0) {
+    return json({ error: 'Amount ကို ဂဏန်းအနေနဲ့ ထည့်ပေးပါ (0 မဖြစ်ရပါ)' }, 400, corsHeaders);
+  }
+
+  const existing = await env.DB.prepare('SELECT id, credits FROM users WHERE id = ?1')
+    .bind(String(userId))
+    .first();
+  if (!existing) {
+    return json({ error: 'User မတွေ့ပါ' }, 404, corsHeaders);
+  }
+
+  const newCredits = Math.max(Number(existing.credits || 0) + delta, 0);
+  await env.DB.prepare(
+    `UPDATE users SET credits = ?1, updated_at = datetime('now') WHERE id = ?2`
+  )
+    .bind(newCredits, String(userId))
+    .run();
+
+  return json({ success: true, credits: newCredits }, 200, corsHeaders);
 }
 
 // ---- Plans: Public ---------------------------------------------------------
@@ -1517,7 +1554,11 @@ function getAdminDashboardHtml() {
           <td>\${u.username ? '@' + u.username : '-'}</td>
           <td>\${u.credits ?? 0}</td>
           <td>\${u.is_admin ? '<span class="badge">ADMIN</span>' : ''} \${u.is_banned ? '<span class="badge banned">BANNED</span>' : ''}</td>
-          <td><button class="btn small \${u.is_banned ? 'ghost' : 'danger'}" onclick="toggleBan('\${u.id}', \${u.is_banned ? 0 : 1})">\${u.is_banned ? 'Unban' : 'Ban'}</button></td>
+          <td style="white-space:nowrap;">
+            <input type="number" id="creditAmt-\${u.id}" placeholder="±amount" style="width:90px; padding:6px 8px; font-size:12px; border:1px solid #ccc; border-radius:4px; margin-right:4px;">
+            <button class="btn small ghost" onclick="adjustCredits('\${u.id}')">Add Credits</button>
+            <button class="btn small \${u.is_banned ? 'ghost' : 'danger'}" onclick="toggleBan('\${u.id}', \${u.is_banned ? 0 : 1})">\${u.is_banned ? 'Unban' : 'Ban'}</button>
+          </td>
         </tr>
       \`).join('');
       wrap.innerHTML = \`<table><thead><tr><th>ID</th><th>Name</th><th>Username</th><th>Credits</th><th>Status</th><th>Action</th></tr></thead><tbody>\${rows}</tbody></table>\`;
@@ -1527,6 +1568,19 @@ function getAdminDashboardHtml() {
       const { ok, data } = await api('/api/admin/users/ban', { userId, banned: !!banned });
       if (ok && data.success) loadUsers();
       else alert(data.error || 'Failed');
+    }
+
+    async function adjustCredits(userId) {
+      const input = document.getElementById('creditAmt-' + userId);
+      const amount = Number(input.value);
+      if (!amount) { alert('Amount ကို ဂဏန်းအနေနဲ့ ထည့်ပေးပါ (နုတ်ချင်ရင် -100 လိုမျိုး ထည့်နိုင်ပါသည်)'); return; }
+      const { ok, data } = await api('/api/admin/users/credits', { userId, amount });
+      if (ok && data.success) {
+        input.value = '';
+        loadUsers();
+      } else {
+        alert(data.error || 'Failed');
+      }
     }
 
     // ---------------- PLANS ----------------
@@ -1826,27 +1880,19 @@ ${FAVICON}
     text-transform:uppercase; color:#a39c8c; margin-top:5px;
   }
 
-  /* ---- the session sheet: numbered stages joined by a marginal spine ---- */
+  /* ---- the session sheet: stacked stage cards ---- */
   .reel{ position:relative; }
-  .stage{ display:flex; gap:18px; position:relative; }
-  .stage + .stage{ margin-top:34px; }
-  .spine{ width:30px; flex-shrink:0; position:relative; padding-top:2px; }
-  .spine .num{
-    font-family:'Fraunces', serif; font-style:italic; font-weight:500;
-    font-size:22px; color:var(--moss-dim); line-height:1; display:block;
-  }
-  .stage:not(:last-child) .spine::after{
-    content:""; position:absolute; top:34px; bottom:-34px; left:11px; width:1px; background:var(--line);
-  }
-  .stage-body{ flex:1; min-width:0; background:var(--panel); border:1px solid var(--line); box-shadow:0 1px 3px rgba(23,26,23,0.04); }
+  .stage{ position:relative; }
+  .stage + .stage{ margin-top:22px; }
+  .stage-body{ background:var(--panel); border:1px solid var(--line); box-shadow:0 1px 3px rgba(23,26,23,0.04); }
   .stage-head{
-    padding:16px 20px 14px; border-bottom:1px solid var(--line); background:var(--moss-soft);
+    padding:16px 20px 14px; border-bottom:1px solid var(--line); background:var(--moss);
     display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap;
   }
-  .stage-head h2{ font-family:'Fraunces', serif; font-weight:600; font-size:17px; margin:0; }
+  .stage-head h2{ font-family:'Fraunces', serif; font-weight:600; font-size:17px; margin:0; color:#fff; }
   .stage-hint{
     font-family:'IBM Plex Mono', monospace; font-size:10.5px; letter-spacing:0.04em;
-    color:#7c9484; text-transform:none;
+    color:rgba(255,255,255,0.75); text-transform:none;
   }
   .stage-inner{ padding:20px; }
 
@@ -1886,8 +1932,8 @@ ${FAVICON}
   }
   .dropzone:hover, .dropzone.drag{ border-color:var(--moss); background:var(--moss-soft); }
   .dropzone .glyph{
-    width:34px; height:34px; border-radius:50%; border:1px solid var(--line);
-    display:flex; align-items:center; justify-content:center; flex-shrink:0; color:var(--moss); font-size:15px;
+    width:34px; height:34px; border-radius:50%; border:none; background:var(--moss);
+    display:flex; align-items:center; justify-content:center; flex-shrink:0; color:#fff; font-size:15px;
   }
   .dropzone .text{ flex:1; min-width:0; }
   .dropzone .filename{
@@ -1905,6 +1951,7 @@ ${FAVICON}
   .promptline input{ font-size:13.5px; }
   .promptline label{ margin-bottom:6px; }
   .optional{ color:#a39c8c; font-weight:400; text-transform:none; letter-spacing:0; }
+  .stage-head .optional{ color:rgba(255,255,255,0.75); }
 
   button.generate{
     width:100%; background:var(--moss); color:#fff; border:none; padding:15px 20px;
@@ -1962,10 +2009,6 @@ ${FAVICON}
     .head-row{ flex-direction:column; align-items:flex-start; gap:14px; }
     .balance{ text-align:left; }
     .stage-inner{ padding:18px; }
-    .stage{ gap:12px; }
-    .spine{ width:24px; }
-    .spine .num{ font-size:18px; }
-    .stage:not(:last-child) .spine::after{ left:9px; }
   }
 </style>
 </head>
@@ -1996,7 +2039,6 @@ ${FAVICON}
   <div class="reel">
 
     <section class="stage">
-      <div class="spine"><span class="num">01</span></div>
       <div class="stage-body">
         <div class="stage-head">
           <h2>Script</h2>
@@ -2011,7 +2053,6 @@ ${FAVICON}
     </section>
 
     <section class="stage">
-      <div class="spine"><span class="num">02</span></div>
       <div class="stage-body">
         <div class="stage-head">
           <h2>Voice</h2>
@@ -2050,7 +2091,6 @@ ${FAVICON}
     </section>
 
     <section class="stage">
-      <div class="spine"><span class="num">03</span></div>
       <div class="stage-body">
         <div class="stage-head">
           <h2>Render</h2>
