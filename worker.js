@@ -764,7 +764,7 @@ async function handleAdminPurchaseReview(request, env, corsHeaders) {
 }
 
 // Credits system: 1 character of TTS text = 1 credit.
-// Credits ကို job စတင်ချိန်မှာ ပြန်နုတ်ပြီး၊ job fail/cancel ဖြစ်ရင် ပြန်ထည့်ပေးသည်။
+// Job အောင်မြင်စွာ ပြီးမြောက်မှသာ (COMPLETED) credits ကို နုတ်ပါသည် — fail/cancel ဖြစ်ရင် ဘာမှ မနုတ်ပါ။
 
 async function handleGenerateStart(request, env, corsHeaders) {
   const body = await request.json();
@@ -816,15 +816,11 @@ async function handleGenerateStart(request, env, corsHeaders) {
     return json({ error: runData.error || 'RunPod request failed' }, 500, corsHeaders);
   }
 
-  // Job တင်ပြီးသွားမှသာ credits ကို နုတ်ပါ
-  await env.DB.prepare(
-    `UPDATE users SET credits = COALESCE(credits, 0) - ?1, updated_at = datetime('now') WHERE id = ?2`
-  )
-    .bind(cost, String(userId))
-    .run();
+  // Credits ကို job အောင်မြင်စွာ ပြီးမြောက်မှသာ နုတ်ပါမည် (handleGenerateStatus ထဲမှာ)
+  // — user တစ်ယောက် job မအောင်မြင်ခဲ့ရင် ဘာမှ ဆုံးရှုံးမှု မရှိစေရန်
 
   return json(
-    { success: true, jobId: runData.id, cost, remainingCredits: currentCredits - cost },
+    { success: true, jobId: runData.id, cost, remainingCredits: currentCredits },
     200,
     corsHeaders
   );
@@ -846,10 +842,10 @@ async function handleGenerateStatus(request, env, corsHeaders) {
   });
   const data = await statusRes.json();
 
-  // Job fail/cancel ဖြစ်ရင် နုတ်ထားတဲ့ credits ကို ပြန်ထည့်ပေးမည်
-  if ((data.status === 'FAILED' || data.status === 'CANCELLED') && userId && cost) {
+  // Job အောင်မြင်စွာ ပြီးမြောက် (audio ထွက်) မှသာ credits ကို နုတ်ပါမည်
+  if (data.status === 'COMPLETED' && userId && cost) {
     await env.DB.prepare(
-      `UPDATE users SET credits = COALESCE(credits, 0) + ?1, updated_at = datetime('now') WHERE id = ?2`
+      `UPDATE users SET credits = COALESCE(credits, 0) - ?1, updated_at = datetime('now') WHERE id = ?2`
     )
       .bind(Number(cost), String(userId))
       .run();
@@ -1028,14 +1024,10 @@ async function handleApiV1Generate(request, env, corsHeaders) {
     return json({ error: runData.error || 'RunPod request failed' }, 500, corsHeaders);
   }
 
-  await env.DB.prepare(
-    `UPDATE users SET credits = COALESCE(credits, 0) - ?1, updated_at = datetime('now') WHERE id = ?2`
-  )
-    .bind(cost, user.id)
-    .run();
+  // Credits ကို job အောင်မြင်စွာ ပြီးမြောက်မှသာ နုတ်ပါမည် (handleApiV1GenerateStatus ထဲမှာ)
 
   return json(
-    { success: true, jobId: runData.id, cost, remainingCredits: currentCredits - cost },
+    { success: true, jobId: runData.id, cost, remainingCredits: currentCredits },
     200,
     corsHeaders
   );
@@ -1066,9 +1058,10 @@ async function handleApiV1GenerateStatus(request, env, corsHeaders) {
   });
   const data = await statusRes.json();
 
-  if ((data.status === 'FAILED' || data.status === 'CANCELLED') && cost) {
+  // Job အောင်မြင်စွာ ပြီးမြောက် (audio ထွက်) မှသာ credits ကို နုတ်ပါမည်
+  if (data.status === 'COMPLETED' && cost) {
     await env.DB.prepare(
-      `UPDATE users SET credits = COALESCE(credits, 0) + ?1, updated_at = datetime('now') WHERE id = ?2`
+      `UPDATE users SET credits = COALESCE(credits, 0) - ?1, updated_at = datetime('now') WHERE id = ?2`
     )
       .bind(Number(cost), user.id)
       .run();
@@ -1455,6 +1448,8 @@ function getAdminDashboardHtml() {
     .msg { font-size: 12px; margin-top: 8px; }
     .msg.ok { color: #4a5d4a; }
     .msg.err { color: #d9534f; }
+    a.back { font-size: 12px; color: #666; text-decoration: none; }
+    a.back:hover { color: #1a1a1a; }
   </style>
 </head>
 <body>
@@ -1462,8 +1457,9 @@ function getAdminDashboardHtml() {
     <div style="font-size:22px;">🎙️</div>
     <h1>Ko Paing AI Voice Studio — Admin</h1>
   </div>
+  <a href="/studio" class="back">← Back to User Panel</a>
 
-  <div class="tabs">
+  <div class="tabs" style="margin-top:16px;">
     <div class="tab active" data-tab="users">Users</div>
     <div class="tab" data-tab="plans">Plans</div>
     <div class="tab" data-tab="settings">Settings</div>
@@ -1773,15 +1769,16 @@ ${FAVICON}
   @import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;1,9..144,500&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap');
 
   :root{
-    --ink:      #201f1c;
-    --paper:    #f7f4ee;
-    --panel:    #fffdf8;
-    --line:     #e4ddcc;
-    --moss:     #4a5d4a;
-    --moss-dim: #7c8c7c;
-    --wax:      #b5482f;
-    --wax-dim:  #d9a190;
-    --shadow:   0 1px 0 rgba(28,27,25,0.05);
+    --ink:      #171a17;
+    --paper:    #ffffff;
+    --panel:    #ffffff;
+    --line:     #e0e6e1;
+    --moss:     #1a7a44;
+    --moss-dim: #8fbfa2;
+    --moss-soft:#eaf7ee;
+    --wax:      #c0392b;
+    --wax-dim:  #e3a99c;
+    --shadow:   0 1px 0 rgba(23,26,23,0.05);
   }
   *{ box-sizing:border-box; }
   body{
@@ -1790,13 +1787,6 @@ ${FAVICON}
     color:var(--ink);
     font-family:'Inter', sans-serif;
     -webkit-font-smoothing:antialiased;
-  }
-  body::before{
-    content:"";
-    position:fixed; inset:0;
-    background-image:repeating-radial-gradient(circle at 50% -40%, transparent 0 68px, rgba(28,27,25,0.018) 69px 70px);
-    pointer-events:none;
-    z-index:0;
   }
   .wrap{ position:relative; z-index:1; max-width:720px; margin:0 auto; padding:28px 24px 90px; }
 
@@ -1810,16 +1800,16 @@ ${FAVICON}
     color:#8a8374; text-decoration:none; padding-bottom:3px;
     border-bottom:1px solid transparent; transition:color .15s ease, border-color .15s ease;
   }
-  .masthead-nav a:hover{ color:var(--wax); border-color:var(--wax); }
+  .masthead-nav a:hover{ color:var(--moss); border-color:var(--moss); }
 
   header{ margin-bottom:38px; }
   .eyebrow{
     font-family:'IBM Plex Mono', monospace;
-    font-size:11px; letter-spacing:0.14em; text-transform:uppercase; color:var(--wax);
+    font-size:11px; letter-spacing:0.14em; text-transform:uppercase; color:var(--moss);
     display:flex; align-items:center; gap:8px; margin-bottom:14px;
   }
   .eyebrow .dot{ width:6px; height:6px; border-radius:50%; background:var(--moss-dim); display:inline-block; }
-  .eyebrow .dot.live{ background:var(--wax); box-shadow:0 0 0 3px rgba(181,72,47,0.15); }
+  .eyebrow .dot.live{ background:var(--moss); box-shadow:0 0 0 3px rgba(26,122,68,0.15); }
   .head-row{ display:flex; justify-content:space-between; align-items:flex-end; gap:20px; }
   h1{
     font-family:'Fraunces', serif; font-optical-sizing:auto; font-weight:600;
@@ -1843,20 +1833,20 @@ ${FAVICON}
   .spine{ width:30px; flex-shrink:0; position:relative; padding-top:2px; }
   .spine .num{
     font-family:'Fraunces', serif; font-style:italic; font-weight:500;
-    font-size:22px; color:var(--wax-dim); line-height:1; display:block;
+    font-size:22px; color:var(--moss-dim); line-height:1; display:block;
   }
   .stage:not(:last-child) .spine::after{
     content:""; position:absolute; top:34px; bottom:-34px; left:11px; width:1px; background:var(--line);
   }
-  .stage-body{ flex:1; min-width:0; background:var(--panel); border:1px solid var(--line); }
+  .stage-body{ flex:1; min-width:0; background:var(--panel); border:1px solid var(--line); box-shadow:0 1px 3px rgba(23,26,23,0.04); }
   .stage-head{
-    padding:16px 20px 14px; border-bottom:1px solid var(--line);
+    padding:16px 20px 14px; border-bottom:1px solid var(--line); background:var(--moss-soft);
     display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap;
   }
   .stage-head h2{ font-family:'Fraunces', serif; font-weight:600; font-size:17px; margin:0; }
   .stage-hint{
     font-family:'IBM Plex Mono', monospace; font-size:10.5px; letter-spacing:0.04em;
-    color:#a39c8c; text-transform:none;
+    color:#7c9484; text-transform:none;
   }
   .stage-inner{ padding:20px; }
 
@@ -1894,7 +1884,7 @@ ${FAVICON}
     border:1px dashed #cfc7b6; border-radius:2px; padding:18px; display:flex; align-items:center;
     gap:14px; cursor:pointer; transition:border-color .15s ease, background .15s ease;
   }
-  .dropzone:hover, .dropzone.drag{ border-color:var(--moss); background:#fbfaf6; }
+  .dropzone:hover, .dropzone.drag{ border-color:var(--moss); background:var(--moss-soft); }
   .dropzone .glyph{
     width:34px; height:34px; border-radius:50%; border:1px solid var(--line);
     display:flex; align-items:center; justify-content:center; flex-shrink:0; color:var(--moss); font-size:15px;
@@ -1917,12 +1907,12 @@ ${FAVICON}
   .optional{ color:#a39c8c; font-weight:400; text-transform:none; letter-spacing:0; }
 
   button.generate{
-    width:100%; background:var(--ink); color:var(--paper); border:none; padding:15px 20px;
+    width:100%; background:var(--moss); color:#fff; border:none; padding:15px 20px;
     font-family:'IBM Plex Mono', monospace; font-size:12.5px; letter-spacing:0.1em; text-transform:uppercase;
     cursor:pointer; display:flex; align-items:center; justify-content:center; gap:10px; transition:background .15s ease;
   }
-  button.generate:hover:not(:disabled){ background:var(--wax); }
-  button.generate:disabled{ background:#cfc7b6; cursor:not-allowed; }
+  button.generate:hover:not(:disabled){ background:#125c34; }
+  button.generate:disabled{ background:#c9d3ce; color:#8a938d; cursor:not-allowed; }
   .spinner{
     width:12px; height:12px; border-radius:50%; border:2px solid rgba(247,244,238,0.35);
     border-top-color:var(--paper); animation:spin .7s linear infinite; display:none;
@@ -1937,16 +1927,16 @@ ${FAVICON}
   .status.ok{ color:var(--moss); }
 
   /* ---- the result, styled as a torn take-slip rather than a card ---- */
-  .output{ position:relative; margin-top:22px; background:var(--paper); padding:22px 0 2px; display:none; }
+  .output{ position:relative; margin-top:22px; background:var(--moss-soft); border:1px solid var(--line); padding:22px 20px 20px; display:none; }
   .output.show{ display:block; }
   .output::before{
-    content:""; position:absolute; top:0; left:-20px; right:-20px; height:8px;
-    background-image:radial-gradient(circle at 8px 0, transparent 6.5px, var(--paper) 7px);
+    content:""; position:absolute; top:-1px; left:1px; right:1px; height:8px;
+    background-image:radial-gradient(circle at 8px 0, transparent 6.5px, var(--panel) 7px);
     background-size:16px 8px; background-repeat:repeat-x; background-position:center top;
   }
   .output-head{
     font-family:'IBM Plex Mono', monospace; font-size:11px; letter-spacing:0.08em; text-transform:uppercase;
-    color:#7a756a; margin-bottom:14px; padding-top:8px; border-top:1px dashed var(--line);
+    color:#5f7c6c; margin-bottom:14px; padding-top:6px;
   }
   .output-head b{ color:var(--ink); font-weight:600; }
   audio{ width:100%; height:42px; }
@@ -2249,8 +2239,8 @@ ${FAVICON}
         throw new Error(startData.error || 'Request failed');
       }
 
-      currentCredits = startData.remainingCredits;
-      creditsNumEl.textContent = currentCredits;
+      // မှတ်ချက်: Credits ကို job အောင်မြင်စွာ ပြီးမြောက်မှသာ နုတ်မည်ဖြစ်၍
+      // ဒီနေရာမှာ balance ကို ကြိုတင်မလျှော့ချပါ — pollForResult ပြီးမှ loadCredits() ဖြင့် sync လုပ်ပါမည်
 
       polling = true;
       await pollForResult(startData.jobId, startData.cost);
@@ -2288,14 +2278,13 @@ ${FAVICON}
         if (out.error) throw new Error(out.error);
         if (!out.audio_base64) throw new Error('Finished but returned no audio.');
         await renderAudio(out);
+        await loadCredits();
         setStatus('Done.', 'ok');
         return;
       } else if (data.status === 'FAILED') {
-        await loadCredits();
-        throw new Error(data.error || 'The worker reported a failure. Credits refunded.');
+        throw new Error(data.error || 'The worker reported a failure. No credits were charged.');
       } else if (data.status === 'CANCELLED') {
-        await loadCredits();
-        throw new Error('Job was cancelled. Credits refunded.');
+        throw new Error('Job was cancelled. No credits were charged.');
       }
 
       await new Promise(r => setTimeout(r, 2000));
@@ -2731,13 +2720,34 @@ function getProfileHtml() {
 
     function copyText(text) {
       if (!text) return;
-      navigator.clipboard.writeText(text).then(() => {
+      const announce = () => {
         if (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.showAlert) {
           window.Telegram.WebApp.showAlert('Copied!');
         } else {
           alert('Copied!');
         }
-      });
+      };
+      const fallback = () => {
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+          announce();
+        } catch (e) {
+          alert('Copy မရပါ — ကိုယ်တိုင် ရွေးပြီး ကူးယူပေးပါ။');
+        }
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(announce).catch(fallback);
+      } else {
+        fallback();
+      }
     }
 
     let lastGeneratedApiKey = null;
@@ -2856,7 +2866,7 @@ function getApiDocsHtml() {
   <p>Request body ထဲမှာ <code>apiKey</code> field ပါ ထည့်ပေးပါ။ Key ကို Profile page → API Key → Generate ကနေ ရယူနိုင်ပါတယ်။ Key ကို ဒီတစ်ကြိမ်တည်းသာ ပြသမည်ဖြစ်၍ လုံခြုံစွာ သိမ်းထားပါ။</p>
 
   <h2>Credits</h2>
-  <p>Voice တစ်ခါ Generate လုပ်တိုင်း <code>text</code> ရဲ့ character အရေအတွက်အတိုင်း credits နုတ်ယူပါသည်။ Credits မလုံလောက်ရင် <code>402</code> error ပြန်ပေးပါမည်။ Job fail/cancel ဖြစ်ရင် နုတ်ထားတဲ့ credits ကို auto ပြန်ထည့်ပေးပါသည်။</p>
+  <p>Voice တစ်ခါ Generate လုပ်တိုင်း <code>text</code> ရဲ့ character အရေအတွက်အတိုင်း credits လိုအပ်ပါသည် (လက်ကျန် စစ်ဆေးမှု ချက်ချင်းလုပ်ပါမည်)။ Credits မလုံလောက်ရင် <code>402</code> error ပြန်ပေးပါမည်။ <strong>Job အောင်မြင်စွာ ပြီးမြောက် (COMPLETED) မှသာ</strong> credits ကို အမှန်တကယ် နုတ်ယူပါသည် — Job fail/cancel ဖြစ်ရင် credits ဘာမှ မနုတ်ပါ။</p>
 
   <h2>1. Generate Voice</h2>
   <span class="badge">POST</span><code>/api/v1/generate</code>
@@ -2884,8 +2894,9 @@ function getApiDocsHtml() {
   "success": true,
   "jobId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
   "cost": 9,
-  "remainingCredits": 4991
+  "remainingCredits": 5000
 }</pre>
+  <p style="font-size:12px; color:#888;">(<code>remainingCredits</code> ဟာ ဒီအချိန်အထိ လက်ကျန် balance ဖြစ်ပြီး — <code>cost</code> ကို job ပြီးမြောက်မှသာ နုတ်ပါမည်)</p>
 
   <h3>Error Responses</h3>
   <table>
@@ -2907,7 +2918,7 @@ function getApiDocsHtml() {
   "jobId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
   "cost": 9
 }</pre>
-  <p style="font-size:12px; color:#888;">(<code>cost</code> ကို ပါထည့်ပေးပါက Job fail ဖြစ်သွားရင် credits auto refund လုပ်ပေးပါမည်)</p>
+  <p style="font-size:12px; color:#888;">(<code>cost</code> ကို ပါထည့်ပေးပါ — status <code>COMPLETED</code> ဖြစ်မှသာ ဒီ credits ကို နုတ်ယူပါမည်။ fail/cancel ဖြစ်ရင် ဘာမှ မနုတ်ပါ)</p>
 
   <h3>Response — Processing</h3>
   <pre>{ "id": "...", "status": "IN_PROGRESS" }</pre>
