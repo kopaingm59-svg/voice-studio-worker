@@ -579,7 +579,7 @@ async function handleAdminVoicePresetsList(request, env, corsHeaders) {
     ).all();
     return json({ success: true, presets: results }, 200, corsHeaders);
   } catch (e) {
-    return json({ error: 'voice_presets table မရှိသေးပါ — migration SQL ကို D1 database မှာ run ပေးပါ' }, 500, corsHeaders);
+    return json({ error: 'DB error: ' + (e && e.message ? e.message : String(e)) }, 500, corsHeaders);
   }
 }
 
@@ -628,7 +628,7 @@ async function handleAdminVoicePresetCreate(request, env, corsHeaders) {
 
     return json({ success: true, id: result.meta.last_row_id }, 200, corsHeaders);
   } catch (e) {
-    return json({ error: 'voice_presets table မရှိသေးပါ — migration SQL ကို D1 database မှာ run ပေးပါ' }, 500, corsHeaders);
+    return json({ error: 'DB error: ' + (e && e.message ? e.message : String(e)) }, 500, corsHeaders);
   }
 }
 
