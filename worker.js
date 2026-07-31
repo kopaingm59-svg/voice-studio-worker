@@ -2563,7 +2563,7 @@ ${FAVICON}
             </div>
           </div>
 
-          <div class="voicetype">
+          <div class="voicetype" id="voiceTypeWrap">
             <label for="voiceTypeSelect">Voice type</label>
             <select id="voiceTypeSelect">
               <option value="female">အမျိုးသမီးအသံ (Female)</option>
@@ -2615,6 +2615,117 @@ ${FAVICON}
 (function(){
   const $ = id => document.getElementById(id);
 
+  // Model ဟာ စာသား ရှည်လွန်းရင် (~900 characters ကျော်) အသံအပြည့်အစုံ မထွက်ဘဲ
+  // တစ်ဝက်လောက်နဲ့ ရပ်သွားတတ်တဲ့အတွက် — Frontend ကနေ စာသားကို အပိုင်းငယ်များအဖြစ်
+  // ပိုင်းခြားပြီး တစ်ပိုင်းချင်းစီ သီးခြား Generate Request ပို့မည်၊ ပြီးရင် ရလာတဲ့
+  // Audio (WAV) များကို တစ်ခုတည်းအဖြစ် ပြန်ပေါင်းစည်းပေးမည်။
+  const MAX_CHUNK_CHARS = 400;
+
+  function splitTextIntoChunks(text, maxLen){
+    const chunks = [];
+    let remaining = text.trim();
+    const breakChars = ['\\n', '။', '၊', '.', '!', '?'];
+    while (remaining.length > maxLen) {
+      let splitAt = -1;
+      const floor = Math.floor(maxLen * 0.4);
+      for (let i = maxLen; i > floor; i--) {
+        if (breakChars.indexOf(remaining[i]) !== -1) { splitAt = i + 1; break; }
+      }
+      if (splitAt === -1) {
+        for (let i = maxLen; i > floor; i--) {
+          if (remaining[i] === ' ') { splitAt = i + 1; break; }
+        }
+      }
+      if (splitAt === -1) splitAt = maxLen;
+      const piece = remaining.slice(0, splitAt).trim();
+      if (piece) chunks.push(piece);
+      remaining = remaining.slice(splitAt).trim();
+    }
+    if (remaining) chunks.push(remaining);
+    return chunks;
+  }
+
+  function base64ToArrayBuffer(base64){
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes.buffer;
+  }
+
+  function arrayBufferToBase64(buffer){
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+    }
+    return btoa(binary);
+  }
+
+  function parseWavBase64(base64){
+    const buffer = base64ToArrayBuffer(base64);
+    const view = new DataView(buffer);
+    let offset = 12; // skip "RIFF" size "WAVE"
+    let fmt = null, dataOffset = null, dataLength = null;
+    while (offset + 8 <= view.byteLength) {
+      const chunkId = String.fromCharCode(view.getUint8(offset), view.getUint8(offset+1), view.getUint8(offset+2), view.getUint8(offset+3));
+      const chunkSize = view.getUint32(offset + 4, true);
+      if (chunkId === 'fmt ') {
+        fmt = {
+          audioFormat: view.getUint16(offset + 8, true),
+          numChannels: view.getUint16(offset + 10, true),
+          sampleRate: view.getUint32(offset + 12, true),
+          byteRate: view.getUint32(offset + 16, true),
+          blockAlign: view.getUint16(offset + 20, true),
+          bitsPerSample: view.getUint16(offset + 22, true),
+        };
+      } else if (chunkId === 'data') {
+        dataOffset = offset + 8;
+        dataLength = chunkSize;
+      }
+      offset += 8 + chunkSize + (chunkSize % 2);
+    }
+    return { buffer, fmt, dataOffset, dataLength };
+  }
+
+  function buildWavHeader(dataLength, fmt){
+    const buffer = new ArrayBuffer(44);
+    const view = new DataView(buffer);
+    const writeStr = (off, str) => { for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i)); };
+    writeStr(0, 'RIFF');
+    view.setUint32(4, 36 + dataLength, true);
+    writeStr(8, 'WAVE');
+    writeStr(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, fmt.audioFormat, true);
+    view.setUint16(22, fmt.numChannels, true);
+    view.setUint32(24, fmt.sampleRate, true);
+    view.setUint32(28, fmt.byteRate, true);
+    view.setUint16(32, fmt.blockAlign, true);
+    view.setUint16(34, fmt.bitsPerSample, true);
+    writeStr(36, 'data');
+    view.setUint32(40, dataLength, true);
+    return buffer;
+  }
+
+  // WAV audio (base64) list များကို PCM data အလိုက် တစ်ခုတည်း WAV file အဖြစ် ပေါင်းစည်းသည်
+  function mergeWavBase64List(base64List){
+    if (base64List.length === 1) return base64List[0];
+    const parsed = base64List.map(parseWavBase64);
+    const fmt = parsed[0].fmt;
+    let totalDataLength = 0;
+    parsed.forEach(p => { totalDataLength += p.dataLength; });
+    const header = buildWavHeader(totalDataLength, fmt);
+    const merged = new Uint8Array(44 + totalDataLength);
+    merged.set(new Uint8Array(header), 0);
+    let off = 44;
+    parsed.forEach(p => {
+      merged.set(new Uint8Array(p.buffer, p.dataOffset, p.dataLength), off);
+      off += p.dataLength;
+    });
+    return arrayBufferToBase64(merged.buffer);
+  }
+
   let tgUser = null;
   try { tgUser = JSON.parse(sessionStorage.getItem('tg_user') || 'null'); } catch(e){}
 
@@ -2646,13 +2757,23 @@ ${FAVICON}
   const multiVoiceHint = $('multiVoiceHint');
   const presetVoiceSelect = $('presetVoiceSelect');
   const uploadVoiceWrap = $('uploadVoiceWrap');
+  const voiceTypeWrap = $('voiceTypeWrap');
 
   voiceTypeSelect.addEventListener('change', () => {
     multiVoiceHint.style.display = voiceTypeSelect.value === 'multi' ? 'block' : 'none';
   });
 
+  // Voice type ဟာ "Upload your own audio" ရွေးထား (preset မရွေးထား) ပြီး
+  // audio file တစ်ခုမှ upload မလုပ်ရသေးတဲ့အခါမှသာ အလုပ်လုပ်တဲ့အတွက် ထိုအချိန်မှသာ show လုပ်ပါမည်
+  // — preset ရွေးထား (သို့) audio upload ထားရင် voice type ကို backend က လျစ်လျူရှုသည်
+  function updateVoiceTypeVisibility(){
+    const showVoiceType = !presetVoiceSelect.value && !refAudioBase64;
+    voiceTypeWrap.style.display = showVoiceType ? '' : 'none';
+  }
+
   presetVoiceSelect.addEventListener('change', () => {
     uploadVoiceWrap.style.display = presetVoiceSelect.value ? 'none' : '';
+    updateVoiceTypeVisibility();
   });
 
   async function loadVoicePresets(){
@@ -2676,6 +2797,8 @@ ${FAVICON}
   let polling = false;
   let lastAudioBase64 = null;
   let lastAudioFormat = null;
+
+  updateVoiceTypeVisibility();
 
   if (!tgUser || !tgUser.id) {
     statusLine.textContent = 'Telegram App ကနေ ပြန်ဝင်ပေးပါ။';
@@ -2723,6 +2846,7 @@ ${FAVICON}
       fileNameLabel.textContent = file.name;
       dropzone.classList.add('has-file');
       promptLine.style.display = 'block';
+      updateVoiceTypeVisibility();
     };
     reader.onerror = () => setStatus('Could not read that file.', 'err');
     reader.readAsDataURL(file);
@@ -2747,6 +2871,7 @@ ${FAVICON}
     dropzone.classList.remove('has-file');
     promptLine.style.display = 'none';
     promptTextEl.value = '';
+    updateVoiceTypeVisibility();
   });
 
   function setStatus(msg, kind){
@@ -2774,28 +2899,44 @@ ${FAVICON}
     setStatus('Sending request…');
 
     try {
-      const startRes = await fetch('/api/generate', {
-        method:'POST',
-        headers:{ 'Content-Type':'application/json' },
-        body: JSON.stringify({
-          userId: tgUser.id,
-          text,
-          refAudioBase64: presetVoiceSelect.value ? undefined : (refAudioBase64 || undefined),
-          promptText: promptTextEl.value.trim() || undefined,
-          voiceType: voiceTypeSelect.value,
-          voicePresetId: presetVoiceSelect.value || undefined
-        })
-      });
-      const startData = await startRes.json();
-      if (!startRes.ok || !startData.success) {
-        throw new Error(startData.error || 'Request failed');
+      const chunks = splitTextIntoChunks(text, MAX_CHUNK_CHARS);
+      const audioParts = [];
+      let lastOut = null;
+      polling = true;
+
+      for (let i = 0; i < chunks.length; i++) {
+        const partLabel = chunks.length > 1 ? (' (' + (i + 1) + '/' + chunks.length + ')') : '';
+        setStatus('Sending request…' + partLabel);
+
+        const startRes = await fetch('/api/generate', {
+          method:'POST',
+          headers:{ 'Content-Type':'application/json' },
+          body: JSON.stringify({
+            userId: tgUser.id,
+            text: chunks[i],
+            refAudioBase64: presetVoiceSelect.value ? undefined : (refAudioBase64 || undefined),
+            promptText: promptTextEl.value.trim() || undefined,
+            voiceType: voiceTypeSelect.value,
+            voicePresetId: presetVoiceSelect.value || undefined
+          })
+        });
+        const startData = await startRes.json();
+        if (!startRes.ok || !startData.success) {
+          throw new Error(startData.error || 'Request failed');
+        }
+
+        // မှတ်ချက်: Credits ကို job အောင်မြင်စွာ ပြီးမြောက်မှသာ နုတ်မည်ဖြစ်၍
+        // ဒီနေရာမှာ balance ကို ကြိုတင်မလျှော့ချပါ — အပိုင်းတိုင်းပြီးမှ loadCredits() ဖြင့် sync လုပ်ပါမည်
+
+        const out = await pollForResult(startData.jobId, startData.cost, partLabel);
+        audioParts.push(out.audio_base64);
+        lastOut = out;
       }
 
-      // မှတ်ချက်: Credits ကို job အောင်မြင်စွာ ပြီးမြောက်မှသာ နုတ်မည်ဖြစ်၍
-      // ဒီနေရာမှာ balance ကို ကြိုတင်မလျှော့ချပါ — pollForResult ပြီးမှ loadCredits() ဖြင့် sync လုပ်ပါမည်
-
-      polling = true;
-      await pollForResult(startData.jobId, startData.cost);
+      const mergedBase64 = mergeWavBase64List(audioParts);
+      await renderAudio({ audio_base64: mergedBase64, sample_rate: lastOut.sample_rate, format: lastOut.format });
+      await loadCredits();
+      setStatus('Done.', 'ok');
 
     } catch (err) {
       setStatus(err.message || 'Something went wrong.', 'err');
@@ -2805,9 +2946,10 @@ ${FAVICON}
     }
   });
 
-  async function pollForResult(jobId, cost){
+  async function pollForResult(jobId, cost, partLabel){
     const started = Date.now();
     const timeoutMs = 5 * 60 * 1000;
+    partLabel = partLabel || '';
 
     while (true) {
       if (Date.now() - started > timeoutMs) {
@@ -2822,17 +2964,14 @@ ${FAVICON}
       const data = await res.json();
 
       if (data.status === 'IN_QUEUE') {
-        setStatus('Waiting in queue…');
+        setStatus('Waiting in queue…' + partLabel);
       } else if (data.status === 'IN_PROGRESS') {
-        setStatus('Generating audio…');
+        setStatus('Generating audio…' + partLabel);
       } else if (data.status === 'COMPLETED') {
         const out = data.output || {};
         if (out.error) throw new Error(out.error);
         if (!out.audio_base64) throw new Error('Finished but returned no audio.');
-        await renderAudio(out);
-        await loadCredits();
-        setStatus('Done.', 'ok');
-        return;
+        return out;
       } else if (data.status === 'FAILED') {
         throw new Error(data.error || 'The worker reported a failure. No credits were charged.');
       } else if (data.status === 'CANCELLED') {
