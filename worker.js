@@ -138,6 +138,20 @@ export default {
         return await handleAdminRequestsList(request, env, corsHeaders);
       }
 
+      // ---- Admin: Voice Presets (pre-uploaded named voices) ---------------
+      if (url.pathname === '/api/admin/voice-presets/list' && request.method === 'POST') {
+        return await handleAdminVoicePresetsList(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/admin/voice-presets/create' && request.method === 'POST') {
+        return await handleAdminVoicePresetCreate(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/admin/voice-presets/delete' && request.method === 'POST') {
+        return await handleAdminVoicePresetDelete(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/admin/voice-presets/get' && request.method === 'POST') {
+        return await handleAdminVoicePresetGet(request, env, corsHeaders);
+      }
+
       // ---- Admin: Purchase Approvals --------------------------------------
       if (url.pathname === '/api/admin/purchases/list' && request.method === 'POST') {
         return await handleAdminPurchasesList(request, env, corsHeaders);
@@ -158,6 +172,11 @@ export default {
       }
       if (url.pathname === '/api/profile/api-key/revoke' && request.method === 'POST') {
         return await handleApiKeyRevoke(request, env, corsHeaders);
+      }
+
+      // ---- Public: Voice Presets list (for Studio dropdown) ---------------
+      if (url.pathname === '/api/voice-presets/list' && request.method === 'POST') {
+        return await handleVoicePresetsList(request, env, corsHeaders);
       }
 
       // ---- Public API (v1) for external site/app integration via API Key --
@@ -546,6 +565,98 @@ async function handleAdminRequestsList(request, env, corsHeaders) {
   }
 }
 
+// ---- Voice Presets: Admin uploads a named reference voice (e.g. "Audio Book"),
+// users pick it from the Studio dropdown instead of uploading their own sample. ----
+
+async function handleAdminVoicePresetsList(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  if (!requireAdmin(env, body.token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT id, name, prompt_text, created_at FROM voice_presets ORDER BY created_at DESC`
+    ).all();
+    return json({ success: true, presets: results }, 200, corsHeaders);
+  } catch (e) {
+    return json({ error: 'voice_presets table မရှိသေးပါ — migration SQL ကို D1 database မှာ run ပေးပါ' }, 500, corsHeaders);
+  }
+}
+
+async function handleAdminVoicePresetGet(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { token, id } = body;
+  if (!requireAdmin(env, token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  if (!id) {
+    return json({ error: 'Missing id' }, 400, corsHeaders);
+  }
+  const preset = await env.DB.prepare(
+    `SELECT id, name, audio_base64, prompt_text FROM voice_presets WHERE id = ?1`
+  ).bind(Number(id)).first();
+  if (!preset) {
+    return json({ error: 'Preset မတွေ့ပါ' }, 404, corsHeaders);
+  }
+  return json({ success: true, preset }, 200, corsHeaders);
+}
+
+async function handleAdminVoicePresetCreate(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { token, name, audioBase64, promptText } = body;
+  if (!requireAdmin(env, token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  if (!name || !name.trim()) {
+    return json({ error: 'Voice name လိုအပ်ပါသည် (ဥပမာ - Audio Book)' }, 400, corsHeaders);
+  }
+  if (!audioBase64) {
+    return json({ error: 'Audio file လိုအပ်ပါသည်' }, 400, corsHeaders);
+  }
+  // ~3MB base64 ceiling (~2.2MB actual audio) — D1 row size ကို ကာကွယ်ရန်
+  if (audioBase64.length > 4_000_000) {
+    return json({ error: 'Audio file အရွယ်အစား ကြီးလွန်းပါသည် — စက္ကန့်အနည်းငယ်ရှိတဲ့ file တို လေး တစ်ခု သုံးပေးပါ' }, 400, corsHeaders);
+  }
+
+  try {
+    const result = await env.DB.prepare(
+      `INSERT INTO voice_presets (name, audio_base64, prompt_text, created_at, updated_at)
+       VALUES (?1, ?2, ?3, datetime('now'), datetime('now'))`
+    )
+      .bind(name.trim(), audioBase64, promptText ? promptText.trim() : null)
+      .run();
+
+    return json({ success: true, id: result.meta.last_row_id }, 200, corsHeaders);
+  } catch (e) {
+    return json({ error: 'voice_presets table မရှိသေးပါ — migration SQL ကို D1 database မှာ run ပေးပါ' }, 500, corsHeaders);
+  }
+}
+
+async function handleAdminVoicePresetDelete(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { token, id } = body;
+  if (!requireAdmin(env, token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  if (!id) {
+    return json({ error: 'Missing id' }, 400, corsHeaders);
+  }
+  await env.DB.prepare(`DELETE FROM voice_presets WHERE id = ?1`).bind(Number(id)).run();
+  return json({ success: true }, 200, corsHeaders);
+}
+
+async function handleVoicePresetsList(request, env, corsHeaders) {
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT id, name FROM voice_presets ORDER BY name ASC`
+    ).all();
+    return json({ success: true, presets: results }, 200, corsHeaders);
+  } catch (e) {
+    // table မရှိသေးရင် Studio ကို ဘာမှ မထိခိုက်ဘဲ empty list ပြန်ပေးမည်
+    return json({ success: true, presets: [] }, 200, corsHeaders);
+  }
+}
+
 // ---- Plans: Public ---------------------------------------------------------
 
 async function handlePlansList(request, env, corsHeaders) {
@@ -873,7 +984,7 @@ async function handleAdminPurchaseReview(request, env, corsHeaders) {
 
 async function handleGenerateStart(request, env, corsHeaders) {
   const body = await request.json();
-  const { userId, text, refAudioBase64, promptText, voiceType } = body;
+  const { userId, text, refAudioBase64, promptText, voiceType, voicePresetId } = body;
 
   if (!userId) {
     return json({ error: 'Missing userId' }, 400, corsHeaders);
@@ -900,10 +1011,24 @@ async function handleGenerateStart(request, env, corsHeaders) {
     );
   }
 
+  // Admin ကြိုတင် upload ထားတဲ့ voice preset ကို ရွေးထားရင် — အဲ့ဒီ preset ရဲ့ audio ကို reference အဖြစ်သုံးမည်
+  let finalRefAudio = refAudioBase64;
+  let finalPromptText = promptText;
+  if (voicePresetId) {
+    const preset = await env.DB.prepare('SELECT audio_base64, prompt_text FROM voice_presets WHERE id = ?1')
+      .bind(Number(voicePresetId))
+      .first();
+    if (!preset) {
+      return json({ error: 'ရွေးထားတဲ့ Voice Preset မတွေ့ပါ' }, 400, corsHeaders);
+    }
+    finalRefAudio = preset.audio_base64;
+    finalPromptText = (promptText && promptText.trim()) ? promptText.trim() : preset.prompt_text;
+  }
+
   const input = { text: text.trim() };
-  if (refAudioBase64) {
-    input.reference_audio_base64 = refAudioBase64;
-    if (promptText && promptText.trim()) input.prompt_text = promptText.trim();
+  if (finalRefAudio) {
+    input.reference_audio_base64 = finalRefAudio;
+    if (finalPromptText && finalPromptText.trim()) input.prompt_text = finalPromptText.trim();
   }
   if (voiceType) input.voice_type = voiceType;
 
@@ -1108,7 +1233,7 @@ async function handleApiKeyRevoke(request, env, corsHeaders) {
 
 async function handleApiV1Generate(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
-  const { apiKey, text, refAudioBase64, promptText, voiceType } = body;
+  const { apiKey, text, refAudioBase64, promptText, voiceType, voicePresetId } = body;
 
   if (!apiKey) {
     return json({ error: 'Missing apiKey' }, 401, corsHeaders);
@@ -1143,9 +1268,22 @@ async function handleApiV1Generate(request, env, corsHeaders) {
   }
 
   const input = { text: text.trim() };
-  if (refAudioBase64) {
-    input.reference_audio_base64 = refAudioBase64;
-    if (promptText && promptText.trim()) input.prompt_text = promptText.trim();
+  // Admin ကြိုတင် upload ထားတဲ့ voice preset ကို ရွေးထားရင် — အဲ့ဒီ preset ရဲ့ audio ကို reference အဖြစ်သုံးမည်
+  let finalRefAudio = refAudioBase64;
+  let finalPromptText = promptText;
+  if (voicePresetId) {
+    const preset = await env.DB.prepare('SELECT audio_base64, prompt_text FROM voice_presets WHERE id = ?1')
+      .bind(Number(voicePresetId))
+      .first();
+    if (!preset) {
+      return json({ error: 'ရွေးထားတဲ့ Voice Preset မတွေ့ပါ' }, 400, corsHeaders);
+    }
+    finalRefAudio = preset.audio_base64;
+    finalPromptText = (promptText && promptText.trim()) ? promptText.trim() : preset.prompt_text;
+  }
+  if (finalRefAudio) {
+    input.reference_audio_base64 = finalRefAudio;
+    if (finalPromptText && finalPromptText.trim()) input.prompt_text = finalPromptText.trim();
   }
   if (voiceType) input.voice_type = voiceType;
 
@@ -1610,6 +1748,7 @@ function getAdminDashboardHtml() {
   <div class="tabs" style="margin-top:16px;">
     <div class="tab active" data-tab="users">Users</div>
     <div class="tab" data-tab="requests">Requests</div>
+    <div class="tab" data-tab="voices">Voices</div>
     <div class="tab" data-tab="plans">Plans</div>
     <div class="tab" data-tab="settings">Settings</div>
     <div class="tab" data-tab="purchases">Purchases</div>
@@ -1617,6 +1756,7 @@ function getAdminDashboardHtml() {
 
   <div class="panel active" id="panel-users"><div class="empty">Loading…</div></div>
   <div class="panel" id="panel-requests"></div>
+  <div class="panel" id="panel-voices"></div>
   <div class="panel" id="panel-plans"></div>
   <div class="panel" id="panel-settings"></div>
   <div class="panel" id="panel-purchases"><div class="empty">Loading…</div></div>
@@ -1635,6 +1775,7 @@ function getAdminDashboardHtml() {
         if (tab.dataset.tab === 'settings') loadSettings();
         if (tab.dataset.tab === 'purchases') loadPurchases();
         if (tab.dataset.tab === 'requests') loadRequestsPanel();
+        if (tab.dataset.tab === 'voices') loadVoicePresetsPanel();
       });
     });
 
@@ -1777,6 +1918,131 @@ function getAdminDashboardHtml() {
         </tr>
       \`).join('');
       wrap.innerHTML = \`<table><thead><tr><th>User</th><th>Source</th><th>Chars</th><th>Status</th><th>Credits Used</th><th>Error</th><th>Time</th></tr></thead><tbody>\${rows}</tbody></table>\`;
+    }
+
+    // ---------------- VOICE PRESETS ----------------
+    let newPresetAudioBase64 = null;
+
+    async function loadVoicePresetsPanel() {
+      const wrap = document.getElementById('panel-voices');
+      wrap.innerHTML = \`
+        <div class="card">
+          <h3>Voice အသစ် Upload လုပ်ရန်</h3>
+          <p style="font-size:12.5px; color:#666; margin-top:0;">Audio file တစ်ခု upload လုပ်ပြီး နာမည်ပေးပါ (ဥပမာ — Audio Book, News Voice)။ User တွေက Voice Studio ထဲက dropdown ကနေ ဒီနာမည်နဲ့ ရွေးနိုင်ပြီး အဲ့ဒီအသံအတိုင်း generate ဖြစ်ပါမည်။</p>
+          <div class="field">
+            <label>Voice Name</label>
+            <input id="presetName" placeholder="e.g. Audio Book">
+          </div>
+          <div class="field">
+            <label>Audio File (WAV / MP3, စက္ကန့်အနည်းငယ်ရှိတဲ့ file တို)</label>
+            <input type="file" id="presetAudioFile" accept="audio/*">
+            <div id="presetFileStatus" style="font-size:11.5px; color:#999; margin-top:6px;"></div>
+          </div>
+          <div class="field">
+            <label>Transcript <span style="color:#999; font-weight:400;">(optional — sample ထဲက စာသား, cloning quality တိုးစေသည်)</span></label>
+            <input id="presetPromptText" placeholder="Sample audio ထဲမှာ ပြောထားတဲ့ စာသား">
+          </div>
+          <button class="btn small" onclick="createVoicePreset()">Upload Voice</button>
+          <div class="msg" id="presetCreateMsg"></div>
+        </div>
+        <div id="presetsListWrap"><div class="empty">Loading…</div></div>
+      \`;
+
+      document.getElementById('presetAudioFile').addEventListener('change', (e) => {
+        const f = e.target.files[0];
+        newPresetAudioBase64 = null;
+        if (!f) return;
+        const statusEl = document.getElementById('presetFileStatus');
+        if (f.size > 3_000_000) {
+          statusEl.textContent = 'File ကြီးလွန်းပါသည် (max ~3MB) — file တို/compress လုပ်ထားတဲ့ file သုံးပါ';
+          statusEl.style.color = '#c0392b';
+          e.target.value = '';
+          return;
+        }
+        statusEl.textContent = 'Reading ' + f.name + '…';
+        statusEl.style.color = '#999';
+        const reader = new FileReader();
+        reader.onload = () => {
+          newPresetAudioBase64 = reader.result.split(',')[1];
+          statusEl.textContent = f.name + ' ✓ ready to upload';
+          statusEl.style.color = '#1a7a44';
+        };
+        reader.readAsDataURL(f);
+      });
+
+      await fetchAndRenderVoicePresets();
+    }
+
+    async function createVoicePreset() {
+      const name = document.getElementById('presetName').value.trim();
+      const promptText = document.getElementById('presetPromptText').value.trim();
+      const msgEl = document.getElementById('presetCreateMsg');
+      msgEl.className = 'msg';
+      msgEl.textContent = '';
+
+      if (!name) { msgEl.className = 'msg err'; msgEl.textContent = 'Voice Name ထည့်ပေးပါ'; return; }
+      if (!newPresetAudioBase64) { msgEl.className = 'msg err'; msgEl.textContent = 'Audio file ရွေးပေးပါ'; return; }
+
+      const { ok, data } = await api('/api/admin/voice-presets/create', {
+        name, audioBase64: newPresetAudioBase64, promptText: promptText || undefined
+      });
+      if (ok && data.success) {
+        msgEl.className = 'msg ok'; msgEl.textContent = 'Upload ပြီးပါပြီ!';
+        document.getElementById('presetName').value = '';
+        document.getElementById('presetPromptText').value = '';
+        document.getElementById('presetAudioFile').value = '';
+        document.getElementById('presetFileStatus').textContent = '';
+        newPresetAudioBase64 = null;
+        fetchAndRenderVoicePresets();
+      } else {
+        msgEl.className = 'msg err'; msgEl.textContent = data.error || 'Failed';
+      }
+    }
+
+    async function fetchAndRenderVoicePresets() {
+      const wrap = document.getElementById('presetsListWrap');
+      wrap.innerHTML = '<div class="empty">Loading…</div>';
+      const { ok, data } = await api('/api/admin/voice-presets/list');
+      if (!ok || !data.success) {
+        wrap.innerHTML = '<div class="error">' + (data.error || 'Failed to load') + '</div>';
+        return;
+      }
+      if (!data.presets.length) {
+        wrap.innerHTML = '<div class="empty">Voice preset မရှိသေးပါ</div>';
+        return;
+      }
+      const rows = data.presets.map(p => \`
+        <tr>
+          <td>\${p.name}</td>
+          <td>\${p.prompt_text || '-'}</td>
+          <td>\${new Date(p.created_at + 'Z').toLocaleString()}</td>
+          <td style="white-space:nowrap;">
+            <button class="btn small ghost" onclick="previewVoicePreset(\${p.id})">Play</button>
+            <button class="btn small danger" onclick="deleteVoicePreset(\${p.id})">Delete</button>
+          </td>
+        </tr>
+        <tr id="presetAudioRow-\${p.id}" style="display:none;"><td colspan="4"><audio id="presetAudio-\${p.id}" controls style="width:100%;"></audio></td></tr>
+      \`).join('');
+      wrap.innerHTML = \`<table><thead><tr><th>Name</th><th>Transcript</th><th>Uploaded</th><th>Action</th></tr></thead><tbody>\${rows}</tbody></table>\`;
+    }
+
+    async function previewVoicePreset(id) {
+      const row = document.getElementById('presetAudioRow-' + id);
+      const audioEl = document.getElementById('presetAudio-' + id);
+      if (row.style.display !== 'none') { row.style.display = 'none'; return; }
+      if (!audioEl.src) {
+        const { ok, data } = await api('/api/admin/voice-presets/get', { id });
+        if (!ok || !data.success) { alert(data.error || 'Failed to load audio'); return; }
+        audioEl.src = 'data:audio/wav;base64,' + data.preset.audio_base64;
+      }
+      row.style.display = '';
+    }
+
+    async function deleteVoicePreset(id) {
+      if (!confirm('ဒီ voice preset ကို ဖျက်မှာ သေချာပါသလား?')) return;
+      const { ok, data } = await api('/api/admin/voice-presets/delete', { id });
+      if (ok && data.success) fetchAndRenderVoicePresets();
+      else alert(data.error || 'Failed');
     }
 
     // ---------------- PLANS ----------------
@@ -2273,19 +2539,28 @@ ${FAVICON}
           <span class="stage-hint optional">optional — add a sample to clone it</span>
         </div>
         <div class="stage-inner">
-          <div class="dropzone" id="dropzone">
-            <div class="glyph">♪</div>
-            <div class="text">
-              <div class="filename" id="fileNameLabel">Choose an audio file, or drop one here</div>
-              <div class="hint">WAV or MP3, a clean few seconds of one speaker works best</div>
-            </div>
-            <button class="clear" id="clearFile" type="button" title="Remove">&times;</button>
+          <div class="voicetype">
+            <label for="presetVoiceSelect">Preset voice <span class="optional">(admin ကြိုတင် upload ထားသော အသံများ)</span></label>
+            <select id="presetVoiceSelect">
+              <option value="">— Upload your own audio —</option>
+            </select>
           </div>
-          <input type="file" id="refAudioInput" accept="audio/*">
 
-          <div class="promptline" id="promptLine" style="display:none;">
-            <label for="promptText">What the sample says <span class="optional">(improves cloning)</span></label>
-            <input type="text" id="promptText" placeholder="Transcript of the voice sample…">
+          <div id="uploadVoiceWrap" style="margin-top:20px;">
+            <div class="dropzone" id="dropzone">
+              <div class="glyph">♪</div>
+              <div class="text">
+                <div class="filename" id="fileNameLabel">Choose an audio file, or drop one here</div>
+                <div class="hint">WAV or MP3, a clean few seconds of one speaker works best</div>
+              </div>
+              <button class="clear" id="clearFile" type="button" title="Remove">&times;</button>
+            </div>
+            <input type="file" id="refAudioInput" accept="audio/*">
+
+            <div class="promptline" id="promptLine" style="display:none;">
+              <label for="promptText">What the sample says <span class="optional">(improves cloning)</span></label>
+              <input type="text" id="promptText" placeholder="Transcript of the voice sample…">
+            </div>
           </div>
 
           <div class="voicetype">
@@ -2369,10 +2644,32 @@ ${FAVICON}
 
   const voiceTypeSelect = $('voiceTypeSelect');
   const multiVoiceHint = $('multiVoiceHint');
+  const presetVoiceSelect = $('presetVoiceSelect');
+  const uploadVoiceWrap = $('uploadVoiceWrap');
 
   voiceTypeSelect.addEventListener('change', () => {
     multiVoiceHint.style.display = voiceTypeSelect.value === 'multi' ? 'block' : 'none';
   });
+
+  presetVoiceSelect.addEventListener('change', () => {
+    uploadVoiceWrap.style.display = presetVoiceSelect.value ? 'none' : '';
+  });
+
+  async function loadVoicePresets(){
+    try {
+      const res = await fetch('/api/voice-presets/list', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const data = await res.json();
+      if (data.success && data.presets && data.presets.length) {
+        data.presets.forEach(p => {
+          const opt = document.createElement('option');
+          opt.value = p.id;
+          opt.textContent = p.name;
+          presetVoiceSelect.appendChild(opt);
+        });
+      }
+    } catch (e) { /* preset list ကို load မရရင် upload-your-own အတိုင်းပဲ ဆက်အလုပ်လုပ်ပါမည် */ }
+  }
+  loadVoicePresets();
 
   let refAudioBase64 = null;
   let currentCredits = 0;
@@ -2483,9 +2780,10 @@ ${FAVICON}
         body: JSON.stringify({
           userId: tgUser.id,
           text,
-          refAudioBase64: refAudioBase64 || undefined,
+          refAudioBase64: presetVoiceSelect.value ? undefined : (refAudioBase64 || undefined),
           promptText: promptTextEl.value.trim() || undefined,
-          voiceType: voiceTypeSelect.value
+          voiceType: voiceTypeSelect.value,
+          voicePresetId: presetVoiceSelect.value || undefined
         })
       });
       const startData = await startRes.json();
@@ -3198,7 +3496,8 @@ function getApiDocsHtml() {
   "text": "မင်္ဂလာပါ",
   "refAudioBase64": "",        // Optional - voice cloning
   "promptText": "",            // Optional - reference audio ရဲ့ transcript
-  "voiceType": ""              // Optional - "female" | "male"
+  "voiceType": "",             // Optional - "female" | "male"
+  "voicePresetId": ""          // Optional - Admin ကြိုတင်တင်ထားတဲ့ Voice preset ID (refAudioBase64 ထက် priority ရှိသည်)
 }</pre>
 
   <table>
@@ -3208,6 +3507,7 @@ function getApiDocsHtml() {
     <tr><td>refAudioBase64</td><td>string</td><td>No</td><td>Voice cloning အတွက် reference audio (base64 WAV)</td></tr>
     <tr><td>promptText</td><td>string</td><td>No</td><td>reference audio ထဲက စာသား (cloning quality တိုးစေသည်)</td></tr>
     <tr><td>voiceType</td><td>string</td><td>No</td><td>"female" or "male" (reference audio မပါရင်သာ အလုပ်လုပ်သည်)</td></tr>
+    <tr><td>voicePresetId</td><td>number</td><td>No</td><td>Admin ကြိုတင် upload ထားတဲ့ voice preset ID — ဒါပါလာရင် refAudioBase64 အစား ဒီ preset ရဲ့ အသံကို သုံးပါမည်</td></tr>
   </table>
 
   <h3>Response (200)</h3>
