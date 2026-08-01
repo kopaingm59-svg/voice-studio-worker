@@ -613,9 +613,9 @@ async function handleAdminVoicePresetCreate(request, env, corsHeaders) {
   if (!audioBase64) {
     return json({ error: 'Audio file လိုအပ်ပါသည်' }, 400, corsHeaders);
   }
-  // D1 ရဲ့ string/blob column limit က 2,000,000 bytes (2MB) ဖြစ်လို့ safety margin ချန်ထားသည်
-  if (audioBase64.length > 1_800_000) {
-    return json({ error: 'Audio file အရွယ်အစား ကြီးလွန်းပါသည် (D1 database limit ~1.3MB) — စက္ကန့်အနည်းငယ်ရှိတဲ့ file တို လေး တစ်ခု (WAV compressed / MP3) သုံးပေးပါ' }, 400, corsHeaders);
+  // ~3MB base64 ceiling (~2.2MB actual audio) — D1 row size ကို ကာကွယ်ရန်
+  if (audioBase64.length > 4_000_000) {
+    return json({ error: 'Audio file အရွယ်အစား ကြီးလွန်းပါသည် — စက္ကန့်အနည်းငယ်ရှိတဲ့ file တို လေး တစ်ခု သုံးပေးပါ' }, 400, corsHeaders);
   }
 
   try {
@@ -982,6 +982,211 @@ async function handleAdminPurchaseReview(request, env, corsHeaders) {
 // Credits system: 1 character of TTS text = 1 credit.
 // Job အောင်မြင်စွာ ပြီးမြောက်မှသာ (COMPLETED) credits ကို နုတ်ပါသည် — fail/cancel ဖြစ်ရင် ဘာမှ မနုတ်ပါ။
 
+// ===========================================================================
+// Long-text TTS support
+// ---------------------------------------------------------------------------
+// Model တစ်ခါ generate() ခေါ်ရင် internal generation-length ကန့်သတ်ချက်ကြောင့်
+// (VOXCPM_MAX_LEN) စာလုံးများများ တစ်ကြိမ်တည်း ပို့လိုက်ရင် audio ဟာ တစ်ဝက်လောက်မှာ
+// ရပ်တန့်သွားတတ်သည် (e.g. 900+ စာလုံး ပို့လိုက်ရင် ~800 လောက်သာ အသံထွက်လာခြင်း)။
+// ဒါကို ကိုင်တွယ်ဖို့ user မမြင်ရအောင် Background (ဒီ Worker) မှာပဲ text ကို safe-length
+// chunk များအဖြစ် ပိုင်းပြီး RunPod job များစွာအဖြစ် ခွဲ ပို့ကာ၊ အားလုံးပြီးတဲ့အခါ audio
+// (WAV) များကို ပြန်ပေါင်းစည်းပြီး တစ်ဆက်တည်း file တစ်ခုအဖြစ် ပြန်ထုတ်ပေးပါသည်။
+// ===========================================================================
+
+const TTS_CHUNK_MAX_CHARS = 400; // request တစ်ခုချင်းစီအတွက် "safe" စာလုံးအရေအတွက်
+const MULTI_JOB_PREFIX = 'multi:'; // compound jobId (RunPod job id များကို ',' ဖြင့်ချိတ်ထား) ဖော်ပြသည့် prefix
+
+// Multi-voice tag ("M:"/"F:"/"C:") continuity ကို ထိန်းသိမ်းလျက် text ကို line boundary
+// အတိုင်းသာ (line တစ်ကြောင်းကို မလျှင်းအောင်) TTS_CHUNK_MAX_CHARS အောက် chunk များအဖြစ်
+// ပိုင်းထုတ်ပေးသည်။ line တစ်ကြောင်းတည်းက ကန့်သတ်ချက်ထက် ကျော်နေရင် sentence/space
+// boundary ဖြင့် ထပ်ပိုင်းသည်။
+function splitTextForTts(text, maxChars, voiceType) {
+  const speakerTagRe = /^\s*([A-Za-z]{1,6})\s*[:：]\s*(.+)$/;
+  const speakerAliases = {
+    m: 'M', male: 'M', man: 'M', boy: 'M',
+    f: 'F', female: 'F', woman: 'F', girl: 'F',
+    c: 'C', child: 'C', kid: 'C',
+  };
+
+  const rawLines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  if (!rawLines.length) return [text.trim()].filter(Boolean);
+
+  // sentence-boundary (သို့) space ဖြင့် line ရှည်ကြီးများကို ပိုင်းထုတ်ပေးသည့် helper
+  function splitLongLine(str, limit) {
+    if (str.length <= limit) return [str];
+    const boundaryRe = /[။၊.!?]\s*/g;
+    const out = [];
+    let remaining = str;
+    while (remaining.length > limit) {
+      const window = remaining.slice(0, limit + 1);
+      let lastIdx = -1;
+      let match;
+      boundaryRe.lastIndex = 0;
+      while ((match = boundaryRe.exec(window)) !== null) {
+        lastIdx = match.index + match[0].length;
+      }
+      let cut = lastIdx;
+      if (cut <= 0) {
+        const lastSpace = remaining.lastIndexOf(' ', limit);
+        cut = lastSpace > 0 ? lastSpace + 1 : limit;
+      }
+      const piece = remaining.slice(0, cut).trim();
+      if (piece) out.push(piece);
+      remaining = remaining.slice(cut).trim();
+    }
+    if (remaining) out.push(remaining);
+    return out;
+  }
+
+  // Line တစ်ကြောင်းချင်းစီကို (voice tag ပါအောင်) ပြန်တည်ဆောက်ပြီး sub-split လုပ်ထားသည့်
+  // စာကြောင်း array တစ်ခုတည်း ရအောင် ပြင်ဆင်သည်
+  let lastTag = null;
+  const outLines = [];
+  for (const line of rawLines) {
+    let tag = null;
+    let content = line;
+    if (voiceType === 'multi') {
+      const m = speakerTagRe.exec(line);
+      if (m && speakerAliases[m[1].trim().toLowerCase()]) {
+        tag = speakerAliases[m[1].trim().toLowerCase()];
+        content = m[2].trim();
+      } else {
+        tag = lastTag; // tag မပါတဲ့ line က ယခင် speaker ကို ဆက်အသုံးပြုမည်
+      }
+      lastTag = tag;
+    }
+    const prefix = tag ? `${tag}: ` : '';
+    const budget = Math.max(maxChars - prefix.length, 20);
+    const subParts = splitLongLine(content, budget);
+    for (const part of subParts) {
+      outLines.push(prefix + part);
+    }
+  }
+
+  // outLines များကို maxChars အောက်ကျန်အောင် greedy ဖြင့် chunk များအဖြစ် ပေါင်းစည်းသည်
+  const chunks = [];
+  let current = [];
+  let currentLen = 0;
+  for (const line of outLines) {
+    if (currentLen > 0 && currentLen + line.length + 1 > maxChars) {
+      chunks.push(current.join('\n'));
+      current = [];
+      currentLen = 0;
+    }
+    current.push(line);
+    currentLen += line.length + 1;
+  }
+  if (current.length) chunks.push(current.join('\n'));
+
+  return chunks.length ? chunks : [text.trim()];
+}
+
+// ---- Base64 <-> bytes helpers (large-buffer safe) --------------------------
+
+function base64ToBytes(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+function bytesToBase64(bytes) {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+// ---- Minimal RIFF/WAVE parsing + stitching ---------------------------------
+
+function parseWav(bytes) {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (dv.getUint32(0, false) !== 0x52494646 /* 'RIFF' */ || dv.getUint32(8, false) !== 0x57415645 /* 'WAVE' */) {
+    throw new Error('Not a valid WAV file');
+  }
+  let offset = 12;
+  let fmt = null;
+  let dataBytes = null;
+  while (offset + 8 <= bytes.length) {
+    const chunkId = String.fromCharCode(bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]);
+    const chunkSize = dv.getUint32(offset + 4, true);
+    const chunkStart = offset + 8;
+    if (chunkId === 'fmt ') {
+      fmt = {
+        channels: dv.getUint16(chunkStart + 2, true),
+        sampleRate: dv.getUint32(chunkStart + 4, true),
+        bitsPerSample: dv.getUint16(chunkStart + 14, true),
+      };
+    } else if (chunkId === 'data') {
+      dataBytes = bytes.subarray(chunkStart, chunkStart + chunkSize);
+    }
+    offset = chunkStart + chunkSize + (chunkSize % 2); // chunks are word-aligned
+  }
+  if (!fmt || !dataBytes) throw new Error('Malformed WAV: missing fmt/data chunk');
+  return { ...fmt, dataBytes };
+}
+
+function buildWavHeader(dataLength, { channels, sampleRate, bitsPerSample }) {
+  const blockAlign = channels * (bitsPerSample / 8);
+  const byteRate = sampleRate * blockAlign;
+  const buf = new ArrayBuffer(44);
+  const dv = new DataView(buf);
+  const writeStr = (offset, str) => { for (let i = 0; i < str.length; i++) dv.setUint8(offset + i, str.charCodeAt(i)); };
+  writeStr(0, 'RIFF');
+  dv.setUint32(4, 36 + dataLength, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  dv.setUint32(16, 16, true);
+  dv.setUint16(20, 1, true); // PCM
+  dv.setUint16(22, channels, true);
+  dv.setUint32(24, sampleRate, true);
+  dv.setUint32(28, byteRate, true);
+  dv.setUint16(32, blockAlign, true);
+  dv.setUint16(34, bitsPerSample, true);
+  writeStr(36, 'data');
+  dv.setUint32(40, dataLength, true);
+  return new Uint8Array(buf);
+}
+
+// audioBase64Chunks ကို (original order အတိုင်း) short silence gap တစ်ခုစီ ခြားပြီး
+// တစ်ဆက်တည်း WAV file တစ်ခုအဖြစ် ပေါင်းစည်းပေးသည်
+function mergeWavChunksBase64(audioBase64Chunks) {
+  if (audioBase64Chunks.length === 1) return audioBase64Chunks[0];
+
+  const parsed = audioBase64Chunks.map(b64 => parseWav(base64ToBytes(b64)));
+  const ref = parsed[0];
+
+  const gapSeconds = 0.25;
+  const gapBytes = Math.floor(ref.sampleRate * gapSeconds) * ref.channels * (ref.bitsPerSample / 8);
+  const gap = new Uint8Array(gapBytes); // silence (zero-filled)
+
+  let totalLen = 0;
+  for (let i = 0; i < parsed.length; i++) {
+    totalLen += parsed[i].dataBytes.length;
+    if (i < parsed.length - 1) totalLen += gap.length;
+  }
+
+  const merged = new Uint8Array(totalLen);
+  let pos = 0;
+  for (let i = 0; i < parsed.length; i++) {
+    merged.set(parsed[i].dataBytes, pos);
+    pos += parsed[i].dataBytes.length;
+    if (i < parsed.length - 1) {
+      merged.set(gap, pos);
+      pos += gap.length;
+    }
+  }
+
+  const header = buildWavHeader(merged.length, ref);
+  const finalBytes = new Uint8Array(header.length + merged.length);
+  finalBytes.set(header, 0);
+  finalBytes.set(merged, header.length);
+
+  return bytesToBase64(finalBytes);
+}
+
 async function handleGenerateStart(request, env, corsHeaders) {
   const body = await request.json();
   const { userId, text, refAudioBase64, promptText, voiceType, voicePresetId } = body;
@@ -1025,34 +1230,46 @@ async function handleGenerateStart(request, env, corsHeaders) {
     finalPromptText = (promptText && promptText.trim()) ? promptText.trim() : preset.prompt_text;
   }
 
-  const input = { text: text.trim() };
-  if (finalRefAudio) {
-    input.reference_audio_base64 = finalRefAudio;
-    if (finalPromptText && finalPromptText.trim()) input.prompt_text = finalPromptText.trim();
-  }
-  if (voiceType) input.voice_type = voiceType;
+  // Long text ကို safe-length chunk များအဖြစ် ပိုင်းပြီး RunPod job များစွာ ခွဲပို့မည်
+  // (chunk တစ်ခုတည်းရှိရင် ယခင်အတိုင်း job တစ်ခုတည်းသာ ဖြစ်မည်)
+  const textChunks = splitTextForTts(text.trim(), TTS_CHUNK_MAX_CHARS, voiceType);
 
-  const runRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/run`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${env.RUNPOD_API_KEY}`,
-    },
-    body: JSON.stringify({ input }),
-  });
+  const jobIds = [];
+  for (const chunkText of textChunks) {
+    const input = { text: chunkText };
+    if (finalRefAudio) {
+      input.reference_audio_base64 = finalRefAudio;
+      if (finalPromptText && finalPromptText.trim()) input.prompt_text = finalPromptText.trim();
+    }
+    if (voiceType) input.voice_type = voiceType;
 
-  const runData = await runRes.json();
-  if (!runRes.ok || !runData.id) {
-    return json({ error: runData.error || 'RunPod request failed' }, 500, corsHeaders);
+    const runRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/run`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${env.RUNPOD_API_KEY}`,
+      },
+      body: JSON.stringify({ input }),
+    });
+
+    const runData = await runRes.json();
+    if (!runRes.ok || !runData.id) {
+      return json({ error: runData.error || 'RunPod request failed' }, 500, corsHeaders);
+    }
+    jobIds.push(runData.id);
   }
 
   // Credits ကို job အောင်မြင်စွာ ပြီးမြောက်မှသာ နုတ်ပါမည် (handleGenerateStatus ထဲမှာ)
   // — user တစ်ယောက် job မအောင်မြင်ခဲ့ရင် ဘာမှ ဆုံးရှုံးမှု မရှိစေရန်
 
-  await logRequestStart(env, { userId, jobId: runData.id, source: 'miniapp', textLength: cost });
+  // chunk တစ်ခုထက်ပိုရင် job id အားလုံးကို compound jobId (MULTI_JOB_PREFIX + ',' ဖြင့်ချိတ်ထား)
+  // အဖြစ် frontend ကို ပြန်ပေးမည် — handleGenerateStatus က ဒါကို မှတ်ပြီး status/audio ကို ပေါင်းစည်းမည်
+  const jobId = jobIds.length > 1 ? MULTI_JOB_PREFIX + jobIds.join(',') : jobIds[0];
+
+  await logRequestStart(env, { userId, jobId, source: 'miniapp', textLength: cost });
 
   return json(
-    { success: true, jobId: runData.id, cost, remainingCredits: currentCredits },
+    { success: true, jobId, cost, remainingCredits: currentCredits },
     200,
     corsHeaders
   );
@@ -1069,10 +1286,9 @@ async function handleGenerateStatus(request, env, corsHeaders) {
     return json({ error: 'RunPod environment variables missing' }, 500, corsHeaders);
   }
 
-  const statusRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/status/${jobId}`, {
-    headers: { Authorization: `Bearer ${env.RUNPOD_API_KEY}` },
-  });
-  const data = await statusRes.json();
+  const data = jobId.startsWith(MULTI_JOB_PREFIX)
+    ? await fetchMultiJobStatus(jobId.slice(MULTI_JOB_PREFIX.length).split(','), env)
+    : await fetchSingleJobStatus(jobId, env);
 
   // Job အောင်မြင်စွာ ပြီးမြောက် (audio ထွက်) မှသာ credits ကို နုတ်ပါမည်
   if (data.status === 'COMPLETED' && userId && cost) {
@@ -1091,6 +1307,57 @@ async function handleGenerateStatus(request, env, corsHeaders) {
   }
 
   return json(data, 200, corsHeaders);
+}
+
+// ---- single job status (RunPod) --------------------------------------------
+
+async function fetchSingleJobStatus(jobId, env) {
+  const statusRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/status/${jobId}`, {
+    headers: { Authorization: `Bearer ${env.RUNPOD_API_KEY}` },
+  });
+  return await statusRes.json();
+}
+
+// ---- multiple (chunked) job status: poll all, merge audio once all COMPLETED ----
+
+async function fetchMultiJobStatus(jobIds, env) {
+  const results = await Promise.all(jobIds.map(id => fetchSingleJobStatus(id, env)));
+
+  const failed = results.find(r => r.status === 'FAILED');
+  if (failed) {
+    return { id: jobIds[0], status: 'FAILED', error: failed.error || 'Background request တစ်ခု fail ဖြစ်သွားပါသည်' };
+  }
+  const cancelled = results.find(r => r.status === 'CANCELLED');
+  if (cancelled) {
+    return { id: jobIds[0], status: 'CANCELLED' };
+  }
+
+  const allCompleted = results.every(r => r.status === 'COMPLETED');
+  if (!allCompleted) {
+    const anyInProgress = results.some(r => r.status === 'IN_PROGRESS');
+    return { id: jobIds[0], status: anyInProgress ? 'IN_PROGRESS' : 'IN_QUEUE' };
+  }
+
+  // Chunk အားလုံး ပြီးပါပြီ — audio (WAV) များကို original order အတိုင်း ပေါင်းစည်းမည်
+  try {
+    const audioChunks = results.map(r => r.output && r.output.audio_base64).filter(Boolean);
+    if (audioChunks.length !== results.length) {
+      return { id: jobIds[0], status: 'FAILED', error: 'Background request တစ်ခုက audio ပြန်မပေးပါ' };
+    }
+    const mergedAudio = mergeWavChunksBase64(audioChunks);
+    const first = results[0].output;
+    return {
+      id: jobIds[0],
+      status: 'COMPLETED',
+      output: {
+        audio_base64: mergedAudio,
+        sample_rate: first.sample_rate,
+        format: first.format || 'wav',
+      },
+    };
+  } catch (e) {
+    return { id: jobIds[0], status: 'FAILED', error: 'Audio segment များ ပေါင်းစည်းရာတွင် error ဖြစ်ပွားသည်: ' + e.message };
+  }
 }
 
 // ===========================================================================
@@ -1934,7 +2201,7 @@ function getAdminDashboardHtml() {
             <input id="presetName" placeholder="e.g. Audio Book">
           </div>
           <div class="field">
-            <label>Audio File (WAV / MP3, max ~1.3MB — စက္ကန့်အနည်းငယ်ရှိတဲ့ file တို)</label>
+            <label>Audio File (WAV / MP3, စက္ကန့်အနည်းငယ်ရှိတဲ့ file တို)</label>
             <input type="file" id="presetAudioFile" accept="audio/*">
             <div id="presetFileStatus" style="font-size:11.5px; color:#999; margin-top:6px;"></div>
           </div>
@@ -1953,8 +2220,8 @@ function getAdminDashboardHtml() {
         newPresetAudioBase64 = null;
         if (!f) return;
         const statusEl = document.getElementById('presetFileStatus');
-        if (f.size > 1_300_000) {
-          statusEl.textContent = 'File ကြီးလွန်းပါသည် (max ~1.3MB, D1 database limit ကြောင့်) — audio file တို/compress လုပ်ထားတဲ့ file သုံးပါ';
+        if (f.size > 3_000_000) {
+          statusEl.textContent = 'File ကြီးလွန်းပါသည် (max ~3MB) — file တို/compress လုပ်ထားတဲ့ file သုံးပါ';
           statusEl.style.color = '#c0392b';
           e.target.value = '';
           return;
@@ -2563,7 +2830,7 @@ ${FAVICON}
             </div>
           </div>
 
-          <div class="voicetype">
+          <div class="voicetype" id="voiceTypeWrap">
             <label for="voiceTypeSelect">Voice type</label>
             <select id="voiceTypeSelect">
               <option value="female">အမျိုးသမီးအသံ (Female)</option>
@@ -2643,6 +2910,7 @@ ${FAVICON}
   const sendTelegramBtn = $('sendTelegramBtn');
 
   const voiceTypeSelect = $('voiceTypeSelect');
+  const voiceTypeWrap = $('voiceTypeWrap');
   const multiVoiceHint = $('multiVoiceHint');
   const presetVoiceSelect = $('presetVoiceSelect');
   const uploadVoiceWrap = $('uploadVoiceWrap');
@@ -2651,8 +2919,18 @@ ${FAVICON}
     multiVoiceHint.style.display = voiceTypeSelect.value === 'multi' ? 'block' : 'none';
   });
 
+  // Voice Type ဟာ reference audio မပါတဲ့အခါမှသာ အလုပ်လုပ်သည် (admin preset ရွေးထားရင်
+  // ဖြစ်စေ၊ own audio upload လုပ်ထားရင်ဖြစ်စေ voice_type ကို backend က လျစ်လျူရှုမည်ဖြစ်၍) —
+  // ဒါကြောင့် "Upload your own audio" ရွေးထားပြီး audio မတင်ရသေးတဲ့အချိန်မှသာ ပြပေးမည်
+  function updateVoiceTypeVisibility(){
+    const hasPreset = !!presetVoiceSelect.value;
+    const hasUpload = !!refAudioBase64;
+    voiceTypeWrap.style.display = (hasPreset || hasUpload) ? 'none' : '';
+  }
+
   presetVoiceSelect.addEventListener('change', () => {
     uploadVoiceWrap.style.display = presetVoiceSelect.value ? 'none' : '';
+    updateVoiceTypeVisibility();
   });
 
   async function loadVoicePresets(){
@@ -2676,6 +2954,8 @@ ${FAVICON}
   let polling = false;
   let lastAudioBase64 = null;
   let lastAudioFormat = null;
+
+  updateVoiceTypeVisibility();
 
   if (!tgUser || !tgUser.id) {
     statusLine.textContent = 'Telegram App ကနေ ပြန်ဝင်ပေးပါ။';
@@ -2723,6 +3003,7 @@ ${FAVICON}
       fileNameLabel.textContent = file.name;
       dropzone.classList.add('has-file');
       promptLine.style.display = 'block';
+      updateVoiceTypeVisibility();
     };
     reader.onerror = () => setStatus('Could not read that file.', 'err');
     reader.readAsDataURL(file);
@@ -2747,6 +3028,7 @@ ${FAVICON}
     dropzone.classList.remove('has-file');
     promptLine.style.display = 'none';
     promptTextEl.value = '';
+    updateVoiceTypeVisibility();
   });
 
   function setStatus(msg, kind){
