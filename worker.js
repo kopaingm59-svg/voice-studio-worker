@@ -613,8 +613,12 @@ async function handleAdminVoicePresetCreate(request, env, corsHeaders) {
   if (!audioBase64) {
     return json({ error: 'Audio file လိုအပ်ပါသည်' }, 400, corsHeaders);
   }
-  // ~3MB base64 ceiling (~2.2MB actual audio) — D1 row size ကို ကာကွယ်ရန်
-  if (audioBase64.length > 4_000_000) {
+  // D1 (Cloudflare) ရဲ့ string/blob/row hard limit က 2,000,000 bytes (2MB) ပါ — အရင်က
+  // ဒီနေရာမှာ 4,000,000 အထိ ခွင့်ပြုထားလို့ 2MB~4MB ကြားရှိတဲ့ audio တွေက ဒီ check ကို
+  // ဖြတ်ပေမယ့် DB ကနေ "SQLITE_TOOBIG" နဲ့ fail ဖြစ်ခဲ့တာ ဖြစ်ပါတယ်။ name/prompt_text
+  // column တွေအတွက်ပါ နေရာချန်ထားရန် D1 limit အောက်မှာ ကောင်းကောင်း ရှောင်ထားသည့် ceiling
+  // ချထားပါသည် (~1.8MB base64 ≈ ~1.35MB actual audio)။
+  if (audioBase64.length > 1_800_000) {
     return json({ error: 'Audio file အရွယ်အစား ကြီးလွန်းပါသည် — စက္ကန့်အနည်းငယ်ရှိတဲ့ file တို လေး တစ်ခု သုံးပေးပါ' }, 400, corsHeaders);
   }
 
@@ -628,7 +632,11 @@ async function handleAdminVoicePresetCreate(request, env, corsHeaders) {
 
     return json({ success: true, id: result.meta.last_row_id }, 200, corsHeaders);
   } catch (e) {
-    return json({ error: 'DB error: ' + (e && e.message ? e.message : String(e)) }, 500, corsHeaders);
+    const msg = e && e.message ? e.message : String(e);
+    if (msg.includes('TOOBIG')) {
+      return json({ error: 'Audio file အရွယ်အစား ကြီးလွန်းပါသည် — စက္ကန့်အနည်းငယ်ရှိတဲ့ file တို လေး တစ်ခု သုံးပေးပါ' }, 400, corsHeaders);
+    }
+    return json({ error: 'DB error: ' + msg }, 500, corsHeaders);
   }
 }
 
