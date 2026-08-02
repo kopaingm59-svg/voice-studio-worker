@@ -160,6 +160,14 @@ export default {
         return await handleAdminPurchaseReview(request, env, corsHeaders);
       }
 
+      // ---- Admin: Notify User (Telegram) -----------------------------------
+      if (url.pathname === '/api/admin/notify-user' && request.method === 'POST') {
+        return await handleAdminNotifyUser(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/admin/broadcast' && request.method === 'POST') {
+        return await handleAdminBroadcast(request, env, corsHeaders);
+      }
+
       // ---- Profile / Referral / API Key -----------------------------------
       if (url.pathname === '/api/profile/get' && request.method === 'POST') {
         return await handleProfileGet(request, env, corsHeaders);
@@ -240,6 +248,41 @@ async function upsertUser(env, userId, { name, username, credits, isAdmin } = {}
 async function getSetting(env, key, defaultValue) {
   const row = await env.DB.prepare('SELECT value FROM settings WHERE key = ?1').bind(key).first();
   return row ? row.value : defaultValue;
+}
+
+// ---- Telegram messaging helpers --------------------------------------------
+// Bot Token ရှိထားပြီး user/admin က bot ကို chat စတင်ထားသူဖြစ်မှသာ (chat_id သိထားမှသာ)
+// message ပို့နိုင်ပါသည် — ဒါကြောင့် Mini App ကနေ login ဝင်ဖူးသူများသာ ပို့နိုင်ပါမည်။
+
+async function sendTelegramMessage(env, chatId, text) {
+  if (!env.TELEGRAM_BOT_TOKEN || !chatId) {
+    return { ok: false, description: 'Telegram bot token (သို့) chat id မရှိပါ' };
+  }
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML' }),
+    });
+    const data = await res.json();
+    return { ok: !!data.ok, description: data.description };
+  } catch (e) {
+    return { ok: false, description: e && e.message ? e.message : String(e) };
+  }
+}
+
+// Admin အဖြစ် မှတ်ထားတဲ့ user (users.is_admin = 1) ကို Telegram message ပို့သည်
+// — Plan ဝယ်တာလို event တွေမှာ Admin ကို notify ဖို့ သုံးမည် (fail ဖြစ်လည်း main flow ကို မထိခိုက်စေရန်
+// error ကို ဆွဲမထားပါ)
+async function notifyAdminTelegram(env, text) {
+  try {
+    const admin = await env.DB.prepare('SELECT id FROM users WHERE is_admin = 1 LIMIT 1').first();
+    if (admin && admin.id) {
+      await sendTelegramMessage(env, admin.id, text);
+    }
+  } catch (e) {
+    // Admin notify fail ဖြစ်လည်း user-facing flow ကို လုံးဝ မထိခိုက်စေရန် swallow လုပ်မည်
+  }
 }
 
 async function setSetting(env, key, value) {
@@ -925,6 +968,24 @@ async function handlePurchaseSubmit(request, env, corsHeaders) {
     .bind(String(userId), plan.id, plan.name, plan.credits, plan.price, slipImageBase64)
     .run();
 
+  // User က Plan ဝယ်တဲ့အချိန် Admin ကို Telegram ဖြင့် အသိပေးမည် (fail ဖြစ်လည်း purchase flow ကို
+  // မထိခိုက်စေရန် notifyAdminTelegram ထဲမှာ error ကို ကိုင်တွယ်ထားပါသည်)
+  const buyerRow = await env.DB.prepare('SELECT name, username FROM users WHERE id = ?1')
+    .bind(String(userId))
+    .first();
+  const buyerLabel = buyerRow
+    ? (buyerRow.username ? `${buyerRow.name || 'User'} (@${buyerRow.username})` : (buyerRow.name || 'User'))
+    : 'User';
+  await notifyAdminTelegram(
+    env,
+    `🛒 <b>Plan ဝယ်ယူမှု အသစ်</b>\n` +
+      `User: ${buyerLabel} (ID: ${userId})\n` +
+      `Plan: ${plan.name}\n` +
+      `Credits: ${plan.credits}\n` +
+      `Price: ${plan.price}\n\n` +
+      `Admin panel ကနေ Approve/Reject လုပ်ပေးပါ။`
+  );
+
   return json({ success: true }, 200, corsHeaders);
 }
 
@@ -985,6 +1046,94 @@ async function handleAdminPurchaseReview(request, env, corsHeaders) {
   }
 
   return json({ success: true }, 200, corsHeaders);
+}
+
+// Server maintenance စတဲ့ အကြောင်းအရာများအတွက် Admin ကနေ user တစ်ယောက်ချင်းစီရဲ့ Telegram
+// account ကို တိုက်ရိုက် message ပို့ဖို့ (User Telegram User ID လိုအပ်ပါသည်)
+async function handleAdminNotifyUser(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { token, userId, message } = body;
+  if (!requireAdmin(env, token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  if (!userId || !String(userId).trim()) {
+    return json({ error: 'User Telegram ID လိုအပ်ပါသည်' }, 400, corsHeaders);
+  }
+  if (!message || !message.trim()) {
+    return json({ error: 'Message လိုအပ်ပါသည်' }, 400, corsHeaders);
+  }
+
+  const result = await sendTelegramMessage(env, String(userId).trim(), message.trim());
+  if (!result.ok) {
+    return json({ error: result.description || 'Telegram ကို ပို့လို့ မရပါ' }, 500, corsHeaders);
+  }
+  return json({ success: true }, 200, corsHeaders);
+}
+
+// User အားလုံး (banned မဟုတ်သူများ) ကို Telegram ဖြင့် Title + Message (Image ပါ/မပါ) တစ်ခါတည်း
+// ပို့ဖို့ — Server ပြုပြင်နေချိန် အသိပေးစာစသည့် broadcast announcement များအတွက်
+async function handleAdminBroadcast(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { token, title, message, imageBase64 } = body;
+  if (!requireAdmin(env, token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  if (!message || !message.trim()) {
+    return json({ error: 'Message လိုအပ်ပါသည်' }, 400, corsHeaders);
+  }
+  if (!env.TELEGRAM_BOT_TOKEN) {
+    return json({ error: 'Telegram bot token မရှိပါ' }, 500, corsHeaders);
+  }
+
+  const { results: users } = await env.DB.prepare(
+    `SELECT id FROM users WHERE is_banned IS NOT 1`
+  ).all();
+  if (!users || !users.length) {
+    return json({ error: 'Notify ပို့ဖို့ user မရှိသေးပါ' }, 400, corsHeaders);
+  }
+
+  const text = title && title.trim() ? `<b>${title.trim()}</b>\n\n${message.trim()}` : message.trim();
+  const photoBytes = imageBase64
+    ? base64ToBytes(imageBase64.includes(',') ? imageBase64.split(',')[1] : imageBase64)
+    : null;
+
+  // Telegram/Workers subrequest ကန့်သတ်ချက်များကို ရှောင်ရန် batch (20 user) တစ်ခုချင်းစီ
+  // parallel ပို့ပြီးမှ batch နောက်တစ်ခု ဆက်ပို့မည်
+  const BATCH_SIZE = 20;
+  let sent = 0;
+  let failed = 0;
+  for (let i = 0; i < users.length; i += BATCH_SIZE) {
+    const batch = users.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(
+      batch.map(u => sendBroadcastToOne(env, u.id, text, photoBytes))
+    );
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value && r.value.ok) sent++; else failed++;
+    }
+  }
+
+  return json({ success: true, sent, failed, total: users.length }, 200, corsHeaders);
+}
+
+async function sendBroadcastToOne(env, chatId, text, photoBytes) {
+  if (photoBytes) {
+    try {
+      const form = new FormData();
+      form.append('chat_id', String(chatId));
+      form.append('photo', new Blob([photoBytes]), 'broadcast.jpg');
+      form.append('caption', text.slice(0, 1024)); // Telegram caption limit
+      form.append('parse_mode', 'HTML');
+      const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`, {
+        method: 'POST',
+        body: form,
+      });
+      const data = await res.json();
+      return { ok: !!data.ok };
+    } catch (e) {
+      return { ok: false };
+    }
+  }
+  return await sendTelegramMessage(env, chatId, text);
 }
 
 // Credits system: 1 character of TTS text = 1 credit.
@@ -2027,6 +2176,8 @@ function getAdminDashboardHtml() {
     <div class="tab" data-tab="plans">Plans</div>
     <div class="tab" data-tab="settings">Settings</div>
     <div class="tab" data-tab="purchases">Purchases</div>
+    <div class="tab" data-tab="notify">Notify User</div>
+    <div class="tab" data-tab="broadcast">Broadcast</div>
   </div>
 
   <div class="panel active" id="panel-users"><div class="empty">Loading…</div></div>
@@ -2035,6 +2186,8 @@ function getAdminDashboardHtml() {
   <div class="panel" id="panel-plans"></div>
   <div class="panel" id="panel-settings"></div>
   <div class="panel" id="panel-purchases"><div class="empty">Loading…</div></div>
+  <div class="panel" id="panel-notify"></div>
+  <div class="panel" id="panel-broadcast"></div>
 
   <script>
     const token = sessionStorage.getItem('admin_token');
@@ -2049,6 +2202,8 @@ function getAdminDashboardHtml() {
         if (tab.dataset.tab === 'plans') loadPlans();
         if (tab.dataset.tab === 'settings') loadSettings();
         if (tab.dataset.tab === 'purchases') loadPurchases();
+        if (tab.dataset.tab === 'notify') loadNotifyPanel();
+        if (tab.dataset.tab === 'broadcast') loadBroadcastPanel();
         if (tab.dataset.tab === 'requests') loadRequestsPanel();
         if (tab.dataset.tab === 'voices') loadVoicePresetsPanel();
       });
@@ -2536,6 +2691,92 @@ function getAdminDashboardHtml() {
     async function reviewPurchase(purchaseId, approve) {
       const { ok, data } = await api('/api/admin/purchases/review', { purchaseId, approve });
       if (ok && data.success) loadPurchases(); else alert(data.error || 'Failed');
+    }
+
+    function loadNotifyPanel() {
+      const wrap = document.getElementById('panel-notify');
+      wrap.innerHTML = \`
+        <div class="card">
+          <h3>User ကို Telegram Message ပို့ပါ</h3>
+          <div class="field"><label>User Telegram ID (Users tab ထဲက ID ကို copy ယူနိုင်ပါသည်)</label>
+            <input id="notifyUserId" placeholder="e.g. 123456789"></div>
+          <div class="field"><label>Message (Server ပြုပြင်နေချိန်, အသိပေးစာ စသည်)</label>
+            <textarea id="notifyMessage" rows="5" placeholder="ဥပမာ - Server ကို မိနစ်အနည်းငယ် ပြုပြင်နေပါသဖြင့် ခဏအတွင်း ပြန်လည် အသုံးပြုနိုင်ပါမည်။"></textarea></div>
+          <button class="btn" onclick="sendUserNotification()">Send</button>
+          <div class="msg" id="notifyMsg"></div>
+        </div>
+      \`;
+    }
+
+    async function sendUserNotification() {
+      const userId = document.getElementById('notifyUserId').value.trim();
+      const message = document.getElementById('notifyMessage').value.trim();
+      const msg = document.getElementById('notifyMsg');
+      if (!userId || !message) {
+        msg.textContent = 'User ID နဲ့ Message နှစ်ခုစလုံး ဖြည့်ပေးပါ။';
+        msg.className = 'msg err';
+        return;
+      }
+      msg.textContent = 'ပို့နေသည်…';
+      msg.className = 'msg';
+      const { ok, data } = await api('/api/admin/notify-user', { userId, message });
+      if (ok && data.success) {
+        msg.textContent = 'ပို့ပြီးပါပြီ ✓';
+        msg.className = 'msg ok';
+        document.getElementById('notifyMessage').value = '';
+      } else {
+        msg.textContent = data.error || 'ပို့လို့ မရပါ';
+        msg.className = 'msg err';
+      }
+    }
+
+    let broadcastImageBase64 = null;
+
+    function loadBroadcastPanel() {
+      const wrap = document.getElementById('panel-broadcast');
+      wrap.innerHTML = \`
+        <div class="card">
+          <h3>User အားလုံးကို Telegram Broadcast ပို့ပါ</h3>
+          <div class="field"><label>Title (optional)</label>
+            <input id="broadcastTitle" placeholder="e.g. Server Maintenance Notice"></div>
+          <div class="field"><label>Message</label>
+            <textarea id="broadcastMessage" rows="5" placeholder="ဥပမာ - Server ကို မိနစ်အနည်းငယ် ပြုပြင်နေပါသဖြင့် ခဏအတွင်း ပြန်လည် အသုံးပြုနိုင်ပါမည်။"></textarea></div>
+          <div class="field"><label>Image (optional)</label>
+            <input id="broadcastImage" type="file" accept="image/*"></div>
+          <button class="btn" onclick="sendBroadcast()">Send to All Users</button>
+          <div class="msg" id="broadcastMsg"></div>
+        </div>
+      \`;
+      document.getElementById('broadcastImage').addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        broadcastImageBase64 = null;
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => { broadcastImageBase64 = reader.result.split(',')[1]; };
+        reader.readAsDataURL(file);
+      });
+    }
+
+    async function sendBroadcast() {
+      const title = document.getElementById('broadcastTitle').value.trim();
+      const message = document.getElementById('broadcastMessage').value.trim();
+      const msg = document.getElementById('broadcastMsg');
+      if (!message) {
+        msg.textContent = 'Message ဖြည့်ပေးပါ။';
+        msg.className = 'msg err';
+        return;
+      }
+      if (!confirm('User အားလုံးကို ဒီ message ပို့မှာ သေချာပါသလား?')) return;
+      msg.textContent = 'User အားလုံးကို ပို့နေသည်…';
+      msg.className = 'msg';
+      const { ok, data } = await api('/api/admin/broadcast', { title, message, imageBase64: broadcastImageBase64 });
+      if (ok && data.success) {
+        msg.textContent = \`ပို့ပြီးပါပြီ — Sent: \${data.sent} / \${data.total} (Failed: \${data.failed})\`;
+        msg.className = 'msg ok';
+      } else {
+        msg.textContent = data.error || 'ပို့လို့ မရပါ';
+        msg.className = 'msg err';
+      }
     }
 
     loadUsers();
