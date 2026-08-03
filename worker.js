@@ -131,6 +131,26 @@ export default {
       if (url.pathname === '/api/admin/users/ban' && request.method === 'POST') {
         return await handleAdminBanUser(request, env, corsHeaders);
       }
+      if (url.pathname === '/api/admin/users/credits' && request.method === 'POST') {
+        return await handleAdminAdjustCredits(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/admin/requests/list' && request.method === 'POST') {
+        return await handleAdminRequestsList(request, env, corsHeaders);
+      }
+
+      // ---- Admin: Voice Presets (pre-uploaded named voices) ---------------
+      if (url.pathname === '/api/admin/voice-presets/list' && request.method === 'POST') {
+        return await handleAdminVoicePresetsList(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/admin/voice-presets/create' && request.method === 'POST') {
+        return await handleAdminVoicePresetCreate(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/admin/voice-presets/delete' && request.method === 'POST') {
+        return await handleAdminVoicePresetDelete(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/admin/voice-presets/get' && request.method === 'POST') {
+        return await handleAdminVoicePresetGet(request, env, corsHeaders);
+      }
 
       // ---- Admin: Purchase Approvals --------------------------------------
       if (url.pathname === '/api/admin/purchases/list' && request.method === 'POST') {
@@ -140,15 +160,31 @@ export default {
         return await handleAdminPurchaseReview(request, env, corsHeaders);
       }
 
+      // ---- Admin: Notify User (Telegram) -----------------------------------
+      if (url.pathname === '/api/admin/notify-user' && request.method === 'POST') {
+        return await handleAdminNotifyUser(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/admin/broadcast' && request.method === 'POST') {
+        return await handleAdminBroadcast(request, env, corsHeaders);
+      }
+
       // ---- Profile / Referral / API Key -----------------------------------
       if (url.pathname === '/api/profile/get' && request.method === 'POST') {
         return await handleProfileGet(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/profile/requests' && request.method === 'POST') {
+        return await handleProfileRequestsList(request, env, corsHeaders);
       }
       if (url.pathname === '/api/profile/api-key/generate' && request.method === 'POST') {
         return await handleApiKeyGenerate(request, env, corsHeaders);
       }
       if (url.pathname === '/api/profile/api-key/revoke' && request.method === 'POST') {
         return await handleApiKeyRevoke(request, env, corsHeaders);
+      }
+
+      // ---- Public: Voice Presets list (for Studio dropdown) ---------------
+      if (url.pathname === '/api/voice-presets/list' && request.method === 'POST') {
+        return await handleVoicePresetsList(request, env, corsHeaders);
       }
 
       // ---- Public API (v1) for external site/app integration via API Key --
@@ -214,6 +250,41 @@ async function getSetting(env, key, defaultValue) {
   return row ? row.value : defaultValue;
 }
 
+// ---- Telegram messaging helpers --------------------------------------------
+// Bot Token ရှိထားပြီး user/admin က bot ကို chat စတင်ထားသူဖြစ်မှသာ (chat_id သိထားမှသာ)
+// message ပို့နိုင်ပါသည် — ဒါကြောင့် Mini App ကနေ login ဝင်ဖူးသူများသာ ပို့နိုင်ပါမည်။
+
+async function sendTelegramMessage(env, chatId, text) {
+  if (!env.TELEGRAM_BOT_TOKEN || !chatId) {
+    return { ok: false, description: 'Telegram bot token (သို့) chat id မရှိပါ' };
+  }
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML' }),
+    });
+    const data = await res.json();
+    return { ok: !!data.ok, description: data.description };
+  } catch (e) {
+    return { ok: false, description: e && e.message ? e.message : String(e) };
+  }
+}
+
+// Admin အဖြစ် မှတ်ထားတဲ့ user (users.is_admin = 1) ကို Telegram message ပို့သည်
+// — Plan ဝယ်တာလို event တွေမှာ Admin ကို notify ဖို့ သုံးမည် (fail ဖြစ်လည်း main flow ကို မထိခိုက်စေရန်
+// error ကို ဆွဲမထားပါ)
+async function notifyAdminTelegram(env, text) {
+  try {
+    const admin = await env.DB.prepare('SELECT id FROM users WHERE is_admin = 1 LIMIT 1').first();
+    if (admin && admin.id) {
+      await sendTelegramMessage(env, admin.id, text);
+    }
+  } catch (e) {
+    // Admin notify fail ဖြစ်လည်း user-facing flow ကို လုံးဝ မထိခိုက်စေရန် swallow လုပ်မည်
+  }
+}
+
 async function setSetting(env, key, value) {
   await env.DB.prepare(
     `INSERT INTO settings (key, value) VALUES (?1, ?2)
@@ -225,6 +296,35 @@ async function setSetting(env, key, value) {
 
 function requireAdmin(env, token) {
   return !!token && token === env.SESSION_SECRET;
+}
+
+// ---- Request logs: tracks each generate call so users/admins can see
+// exactly what happened to a request (queued/completed/failed, credits used) ----
+
+async function logRequestStart(env, { userId, jobId, source, textLength }) {
+  try {
+    await env.DB.prepare(
+      `INSERT INTO request_logs (user_id, job_id, source, text_length, status, credits_charged, created_at, updated_at)
+       VALUES (?1, ?2, ?3, ?4, 'IN_QUEUE', 0, datetime('now'), datetime('now'))`
+    )
+      .bind(String(userId), String(jobId), source, Number(textLength) || 0)
+      .run();
+  } catch (e) {
+    // request_logs table မရှိသေးရင်တောင် voice generation ကို ဆက်လက် အလုပ်လုပ်စေရန် (မထိခိုက်ရန်)
+    console.error('logRequestStart failed', e);
+  }
+}
+
+async function logRequestUpdate(env, jobId, { status, creditsCharged, errorMessage }) {
+  try {
+    await env.DB.prepare(
+      `UPDATE request_logs SET status = ?1, credits_charged = ?2, error_message = ?3, updated_at = datetime('now') WHERE job_id = ?4`
+    )
+      .bind(status, Number(creditsCharged) || 0, errorMessage || null, String(jobId))
+      .run();
+  } catch (e) {
+    console.error('logRequestUpdate failed', e);
+  }
 }
 
 // ---- Referral code + API key helpers --------------------------------------
@@ -439,6 +539,173 @@ async function handleAdminBanUser(request, env, corsHeaders) {
     .run();
 
   return json({ success: true }, 200, corsHeaders);
+}
+
+// ---- Admin: Adjust a single user's credits (top-up) -----------------------
+
+async function handleAdminAdjustCredits(request, env, corsHeaders) {
+  const body = await request.json();
+  const { token, userId, amount } = body;
+
+  if (!requireAdmin(env, token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  if (!userId) {
+    return json({ error: 'Missing userId' }, 400, corsHeaders);
+  }
+  const delta = Number(amount);
+  if (!Number.isFinite(delta) || delta === 0) {
+    return json({ error: 'Amount ကို ဂဏန်းအနေနဲ့ ထည့်ပေးပါ (0 မဖြစ်ရပါ)' }, 400, corsHeaders);
+  }
+
+  const existing = await env.DB.prepare('SELECT id, credits FROM users WHERE id = ?1')
+    .bind(String(userId))
+    .first();
+  if (!existing) {
+    return json({ error: 'User မတွေ့ပါ' }, 404, corsHeaders);
+  }
+
+  const newCredits = Math.max(Number(existing.credits || 0) + delta, 0);
+  await env.DB.prepare(
+    `UPDATE users SET credits = ?1, updated_at = datetime('now') WHERE id = ?2`
+  )
+    .bind(newCredits, String(userId))
+    .run();
+
+  return json({ success: true, credits: newCredits }, 200, corsHeaders);
+}
+
+// ---- Admin: Request logs (view any/all users' generate history) -----------
+
+async function handleAdminRequestsList(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { token, userId } = body;
+
+  if (!requireAdmin(env, token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+
+  try {
+    let query, binding;
+    if (userId) {
+      query = `SELECT r.job_id, r.user_id, r.source, r.text_length, r.status, r.credits_charged, r.error_message, r.created_at,
+                      u.name as user_name, u.username as user_username
+               FROM request_logs r LEFT JOIN users u ON u.id = r.user_id
+               WHERE r.user_id = ?1 ORDER BY r.created_at DESC LIMIT 200`;
+      binding = String(userId);
+    } else {
+      query = `SELECT r.job_id, r.user_id, r.source, r.text_length, r.status, r.credits_charged, r.error_message, r.created_at,
+                      u.name as user_name, u.username as user_username
+               FROM request_logs r LEFT JOIN users u ON u.id = r.user_id
+               ORDER BY r.created_at DESC LIMIT 200`;
+    }
+    const stmt = binding ? env.DB.prepare(query).bind(binding) : env.DB.prepare(query);
+    const { results } = await stmt.all();
+
+    return json({ success: true, requests: results }, 200, corsHeaders);
+  } catch (e) {
+    return json({ error: 'request_logs table မရှိသေးပါ — အောက်က migration SQL ကို D1 database မှာ run ပေးပါ' }, 500, corsHeaders);
+  }
+}
+
+// ---- Voice Presets: Admin uploads a named reference voice (e.g. "Audio Book"),
+// users pick it from the Studio dropdown instead of uploading their own sample. ----
+
+async function handleAdminVoicePresetsList(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  if (!requireAdmin(env, body.token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT id, name, prompt_text, created_at FROM voice_presets ORDER BY created_at DESC`
+    ).all();
+    return json({ success: true, presets: results }, 200, corsHeaders);
+  } catch (e) {
+    return json({ error: 'DB error: ' + (e && e.message ? e.message : String(e)) }, 500, corsHeaders);
+  }
+}
+
+async function handleAdminVoicePresetGet(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { token, id } = body;
+  if (!requireAdmin(env, token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  if (!id) {
+    return json({ error: 'Missing id' }, 400, corsHeaders);
+  }
+  const preset = await env.DB.prepare(
+    `SELECT id, name, audio_base64, prompt_text FROM voice_presets WHERE id = ?1`
+  ).bind(Number(id)).first();
+  if (!preset) {
+    return json({ error: 'Preset မတွေ့ပါ' }, 404, corsHeaders);
+  }
+  return json({ success: true, preset }, 200, corsHeaders);
+}
+
+async function handleAdminVoicePresetCreate(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { token, name, audioBase64, promptText } = body;
+  if (!requireAdmin(env, token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  if (!name || !name.trim()) {
+    return json({ error: 'Voice name လိုအပ်ပါသည် (ဥပမာ - Audio Book)' }, 400, corsHeaders);
+  }
+  if (!audioBase64) {
+    return json({ error: 'Audio file လိုအပ်ပါသည်' }, 400, corsHeaders);
+  }
+  // D1 (Cloudflare) ရဲ့ string/blob/row hard limit က 2,000,000 bytes (2MB) ပါ — အရင်က
+  // ဒီနေရာမှာ 4,000,000 အထိ ခွင့်ပြုထားလို့ 2MB~4MB ကြားရှိတဲ့ audio တွေက ဒီ check ကို
+  // ဖြတ်ပေမယ့် DB ကနေ "SQLITE_TOOBIG" နဲ့ fail ဖြစ်ခဲ့တာ ဖြစ်ပါတယ်။ name/prompt_text
+  // column တွေအတွက်ပါ နေရာချန်ထားရန် D1 limit အောက်မှာ ကောင်းကောင်း ရှောင်ထားသည့် ceiling
+  // ချထားပါသည် (~1.8MB base64 ≈ ~1.35MB actual audio)။
+  if (audioBase64.length > 1_800_000) {
+    return json({ error: 'Audio file အရွယ်အစား ကြီးလွန်းပါသည် — စက္ကန့်အနည်းငယ်ရှိတဲ့ file တို လေး တစ်ခု သုံးပေးပါ' }, 400, corsHeaders);
+  }
+
+  try {
+    const result = await env.DB.prepare(
+      `INSERT INTO voice_presets (name, audio_base64, prompt_text, created_at, updated_at)
+       VALUES (?1, ?2, ?3, datetime('now'), datetime('now'))`
+    )
+      .bind(name.trim(), audioBase64, promptText ? promptText.trim() : null)
+      .run();
+
+    return json({ success: true, id: result.meta.last_row_id }, 200, corsHeaders);
+  } catch (e) {
+    const msg = e && e.message ? e.message : String(e);
+    if (msg.includes('TOOBIG')) {
+      return json({ error: 'Audio file အရွယ်အစား ကြီးလွန်းပါသည် — စက္ကန့်အနည်းငယ်ရှိတဲ့ file တို လေး တစ်ခု သုံးပေးပါ' }, 400, corsHeaders);
+    }
+    return json({ error: 'DB error: ' + msg }, 500, corsHeaders);
+  }
+}
+
+async function handleAdminVoicePresetDelete(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { token, id } = body;
+  if (!requireAdmin(env, token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  if (!id) {
+    return json({ error: 'Missing id' }, 400, corsHeaders);
+  }
+  await env.DB.prepare(`DELETE FROM voice_presets WHERE id = ?1`).bind(Number(id)).run();
+  return json({ success: true }, 200, corsHeaders);
+}
+
+async function handleVoicePresetsList(request, env, corsHeaders) {
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT id, name FROM voice_presets ORDER BY name ASC`
+    ).all();
+    return json({ success: true, presets: results }, 200, corsHeaders);
+  } catch (e) {
+    // table မရှိသေးရင် Studio ကို ဘာမှ မထိခိုက်ဘဲ empty list ပြန်ပေးမည်
+    return json({ success: true, presets: [] }, 200, corsHeaders);
+  }
 }
 
 // ---- Plans: Public ---------------------------------------------------------
@@ -701,6 +968,24 @@ async function handlePurchaseSubmit(request, env, corsHeaders) {
     .bind(String(userId), plan.id, plan.name, plan.credits, plan.price, slipImageBase64)
     .run();
 
+  // User က Plan ဝယ်တဲ့အချိန် Admin ကို Telegram ဖြင့် အသိပေးမည် (fail ဖြစ်လည်း purchase flow ကို
+  // မထိခိုက်စေရန် notifyAdminTelegram ထဲမှာ error ကို ကိုင်တွယ်ထားပါသည်)
+  const buyerRow = await env.DB.prepare('SELECT name, username FROM users WHERE id = ?1')
+    .bind(String(userId))
+    .first();
+  const buyerLabel = buyerRow
+    ? (buyerRow.username ? `${buyerRow.name || 'User'} (@${buyerRow.username})` : (buyerRow.name || 'User'))
+    : 'User';
+  await notifyAdminTelegram(
+    env,
+    `🛒 <b>Plan ဝယ်ယူမှု အသစ်</b>\n` +
+      `User: ${buyerLabel} (ID: ${userId})\n` +
+      `Plan: ${plan.name}\n` +
+      `Credits: ${plan.credits}\n` +
+      `Price: ${plan.price}\n\n` +
+      `Admin panel ကနေ Approve/Reject လုပ်ပေးပါ။`
+  );
+
   return json({ success: true }, 200, corsHeaders);
 }
 
@@ -763,12 +1048,305 @@ async function handleAdminPurchaseReview(request, env, corsHeaders) {
   return json({ success: true }, 200, corsHeaders);
 }
 
+// Server maintenance စတဲ့ အကြောင်းအရာများအတွက် Admin ကနေ user တစ်ယောက်ချင်းစီရဲ့ Telegram
+// account ကို တိုက်ရိုက် message ပို့ဖို့ (User Telegram User ID လိုအပ်ပါသည်)
+async function handleAdminNotifyUser(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { token, userId, message } = body;
+  if (!requireAdmin(env, token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  if (!userId || !String(userId).trim()) {
+    return json({ error: 'User Telegram ID လိုအပ်ပါသည်' }, 400, corsHeaders);
+  }
+  if (!message || !message.trim()) {
+    return json({ error: 'Message လိုအပ်ပါသည်' }, 400, corsHeaders);
+  }
+
+  const result = await sendTelegramMessage(env, String(userId).trim(), message.trim());
+  if (!result.ok) {
+    return json({ error: result.description || 'Telegram ကို ပို့လို့ မရပါ' }, 500, corsHeaders);
+  }
+  return json({ success: true }, 200, corsHeaders);
+}
+
+// User အားလုံး (banned မဟုတ်သူများ) ကို Telegram ဖြင့် Title + Message (Image ပါ/မပါ) တစ်ခါတည်း
+// ပို့ဖို့ — Server ပြုပြင်နေချိန် အသိပေးစာစသည့် broadcast announcement များအတွက်
+async function handleAdminBroadcast(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { token, title, message, imageBase64 } = body;
+  if (!requireAdmin(env, token)) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  if (!message || !message.trim()) {
+    return json({ error: 'Message လိုအပ်ပါသည်' }, 400, corsHeaders);
+  }
+  if (!env.TELEGRAM_BOT_TOKEN) {
+    return json({ error: 'Telegram bot token မရှိပါ' }, 500, corsHeaders);
+  }
+
+  const { results: users } = await env.DB.prepare(
+    `SELECT id FROM users WHERE is_banned IS NOT 1`
+  ).all();
+  if (!users || !users.length) {
+    return json({ error: 'Notify ပို့ဖို့ user မရှိသေးပါ' }, 400, corsHeaders);
+  }
+
+  const text = title && title.trim() ? `<b>${title.trim()}</b>\n\n${message.trim()}` : message.trim();
+  const photoBytes = imageBase64
+    ? base64ToBytes(imageBase64.includes(',') ? imageBase64.split(',')[1] : imageBase64)
+    : null;
+
+  // Telegram/Workers subrequest ကန့်သတ်ချက်များကို ရှောင်ရန် batch (20 user) တစ်ခုချင်းစီ
+  // parallel ပို့ပြီးမှ batch နောက်တစ်ခု ဆက်ပို့မည်
+  const BATCH_SIZE = 20;
+  let sent = 0;
+  let failed = 0;
+  for (let i = 0; i < users.length; i += BATCH_SIZE) {
+    const batch = users.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(
+      batch.map(u => sendBroadcastToOne(env, u.id, text, photoBytes))
+    );
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value && r.value.ok) sent++; else failed++;
+    }
+  }
+
+  return json({ success: true, sent, failed, total: users.length }, 200, corsHeaders);
+}
+
+async function sendBroadcastToOne(env, chatId, text, photoBytes) {
+  if (photoBytes) {
+    try {
+      const form = new FormData();
+      form.append('chat_id', String(chatId));
+      form.append('photo', new Blob([photoBytes]), 'broadcast.jpg');
+      form.append('caption', text.slice(0, 1024)); // Telegram caption limit
+      form.append('parse_mode', 'HTML');
+      const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`, {
+        method: 'POST',
+        body: form,
+      });
+      const data = await res.json();
+      return { ok: !!data.ok };
+    } catch (e) {
+      return { ok: false };
+    }
+  }
+  return await sendTelegramMessage(env, chatId, text);
+}
+
 // Credits system: 1 character of TTS text = 1 credit.
-// Credits ကို job စတင်ချိန်မှာ ပြန်နုတ်ပြီး၊ job fail/cancel ဖြစ်ရင် ပြန်ထည့်ပေးသည်။
+// Job အောင်မြင်စွာ ပြီးမြောက်မှသာ (COMPLETED) credits ကို နုတ်ပါသည် — fail/cancel ဖြစ်ရင် ဘာမှ မနုတ်ပါ။
+
+// ===========================================================================
+// Long-text TTS support
+// ---------------------------------------------------------------------------
+// Model တစ်ခါ generate() ခေါ်ရင် internal generation-length ကန့်သတ်ချက်ကြောင့်
+// (VOXCPM_MAX_LEN) စာလုံးများများ တစ်ကြိမ်တည်း ပို့လိုက်ရင် audio ဟာ တစ်ဝက်လောက်မှာ
+// ရပ်တန့်သွားတတ်သည် (e.g. 900+ စာလုံး ပို့လိုက်ရင် ~800 လောက်သာ အသံထွက်လာခြင်း)။
+// ဒါကို ကိုင်တွယ်ဖို့ user မမြင်ရအောင် Background (ဒီ Worker) မှာပဲ text ကို safe-length
+// chunk များအဖြစ် ပိုင်းပြီး RunPod job များစွာအဖြစ် ခွဲ ပို့ကာ၊ အားလုံးပြီးတဲ့အခါ audio
+// (WAV) များကို ပြန်ပေါင်းစည်းပြီး တစ်ဆက်တည်း file တစ်ခုအဖြစ် ပြန်ထုတ်ပေးပါသည်။
+// ===========================================================================
+
+const TTS_CHUNK_MAX_CHARS = 400; // request တစ်ခုချင်းစီအတွက် "safe" စာလုံးအရေအတွက်
+const MULTI_JOB_PREFIX = 'multi:'; // compound jobId (RunPod job id များကို ',' ဖြင့်ချိတ်ထား) ဖော်ပြသည့် prefix
+
+// Multi-voice tag ("M:"/"F:"/"C:") continuity ကို ထိန်းသိမ်းလျက် text ကို line boundary
+// အတိုင်းသာ (line တစ်ကြောင်းကို မလျှင်းအောင်) TTS_CHUNK_MAX_CHARS အောက် chunk များအဖြစ်
+// ပိုင်းထုတ်ပေးသည်။ line တစ်ကြောင်းတည်းက ကန့်သတ်ချက်ထက် ကျော်နေရင် sentence/space
+// boundary ဖြင့် ထပ်ပိုင်းသည်။
+function splitTextForTts(text, maxChars, voiceType) {
+  const speakerTagRe = /^\s*([A-Za-z]{1,6})\s*[:：]\s*(.+)$/;
+  const speakerAliases = {
+    m: 'M', male: 'M', man: 'M', boy: 'M',
+    f: 'F', female: 'F', woman: 'F', girl: 'F',
+    c: 'C', child: 'C', kid: 'C',
+  };
+
+  const rawLines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  if (!rawLines.length) return [text.trim()].filter(Boolean);
+
+  // sentence-boundary (သို့) space ဖြင့် line ရှည်ကြီးများကို ပိုင်းထုတ်ပေးသည့် helper
+  function splitLongLine(str, limit) {
+    if (str.length <= limit) return [str];
+    const boundaryRe = /[။၊.!?]\s*/g;
+    const out = [];
+    let remaining = str;
+    while (remaining.length > limit) {
+      const window = remaining.slice(0, limit + 1);
+      let lastIdx = -1;
+      let match;
+      boundaryRe.lastIndex = 0;
+      while ((match = boundaryRe.exec(window)) !== null) {
+        lastIdx = match.index + match[0].length;
+      }
+      let cut = lastIdx;
+      if (cut <= 0) {
+        const lastSpace = remaining.lastIndexOf(' ', limit);
+        cut = lastSpace > 0 ? lastSpace + 1 : limit;
+      }
+      const piece = remaining.slice(0, cut).trim();
+      if (piece) out.push(piece);
+      remaining = remaining.slice(cut).trim();
+    }
+    if (remaining) out.push(remaining);
+    return out;
+  }
+
+  // Line တစ်ကြောင်းချင်းစီကို (voice tag ပါအောင်) ပြန်တည်ဆောက်ပြီး sub-split လုပ်ထားသည့်
+  // စာကြောင်း array တစ်ခုတည်း ရအောင် ပြင်ဆင်သည်
+  let lastTag = null;
+  const outLines = [];
+  for (const line of rawLines) {
+    let tag = null;
+    let content = line;
+    if (voiceType === 'multi') {
+      const m = speakerTagRe.exec(line);
+      if (m && speakerAliases[m[1].trim().toLowerCase()]) {
+        tag = speakerAliases[m[1].trim().toLowerCase()];
+        content = m[2].trim();
+      } else {
+        tag = lastTag; // tag မပါတဲ့ line က ယခင် speaker ကို ဆက်အသုံးပြုမည်
+      }
+      lastTag = tag;
+    }
+    const prefix = tag ? `${tag}: ` : '';
+    const budget = Math.max(maxChars - prefix.length, 20);
+    const subParts = splitLongLine(content, budget);
+    for (const part of subParts) {
+      outLines.push(prefix + part);
+    }
+  }
+
+  // outLines များကို maxChars အောက်ကျန်အောင် greedy ဖြင့် chunk များအဖြစ် ပေါင်းစည်းသည်
+  const chunks = [];
+  let current = [];
+  let currentLen = 0;
+  for (const line of outLines) {
+    if (currentLen > 0 && currentLen + line.length + 1 > maxChars) {
+      chunks.push(current.join('\n'));
+      current = [];
+      currentLen = 0;
+    }
+    current.push(line);
+    currentLen += line.length + 1;
+  }
+  if (current.length) chunks.push(current.join('\n'));
+
+  return chunks.length ? chunks : [text.trim()];
+}
+
+// ---- Base64 <-> bytes helpers (large-buffer safe) --------------------------
+
+function base64ToBytes(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+function bytesToBase64(bytes) {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+// ---- Minimal RIFF/WAVE parsing + stitching ---------------------------------
+
+function parseWav(bytes) {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (dv.getUint32(0, false) !== 0x52494646 /* 'RIFF' */ || dv.getUint32(8, false) !== 0x57415645 /* 'WAVE' */) {
+    throw new Error('Not a valid WAV file');
+  }
+  let offset = 12;
+  let fmt = null;
+  let dataBytes = null;
+  while (offset + 8 <= bytes.length) {
+    const chunkId = String.fromCharCode(bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]);
+    const chunkSize = dv.getUint32(offset + 4, true);
+    const chunkStart = offset + 8;
+    if (chunkId === 'fmt ') {
+      fmt = {
+        channels: dv.getUint16(chunkStart + 2, true),
+        sampleRate: dv.getUint32(chunkStart + 4, true),
+        bitsPerSample: dv.getUint16(chunkStart + 14, true),
+      };
+    } else if (chunkId === 'data') {
+      dataBytes = bytes.subarray(chunkStart, chunkStart + chunkSize);
+    }
+    offset = chunkStart + chunkSize + (chunkSize % 2); // chunks are word-aligned
+  }
+  if (!fmt || !dataBytes) throw new Error('Malformed WAV: missing fmt/data chunk');
+  return { ...fmt, dataBytes };
+}
+
+function buildWavHeader(dataLength, { channels, sampleRate, bitsPerSample }) {
+  const blockAlign = channels * (bitsPerSample / 8);
+  const byteRate = sampleRate * blockAlign;
+  const buf = new ArrayBuffer(44);
+  const dv = new DataView(buf);
+  const writeStr = (offset, str) => { for (let i = 0; i < str.length; i++) dv.setUint8(offset + i, str.charCodeAt(i)); };
+  writeStr(0, 'RIFF');
+  dv.setUint32(4, 36 + dataLength, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  dv.setUint32(16, 16, true);
+  dv.setUint16(20, 1, true); // PCM
+  dv.setUint16(22, channels, true);
+  dv.setUint32(24, sampleRate, true);
+  dv.setUint32(28, byteRate, true);
+  dv.setUint16(32, blockAlign, true);
+  dv.setUint16(34, bitsPerSample, true);
+  writeStr(36, 'data');
+  dv.setUint32(40, dataLength, true);
+  return new Uint8Array(buf);
+}
+
+// audioBase64Chunks ကို (original order အတိုင်း) short silence gap တစ်ခုစီ ခြားပြီး
+// တစ်ဆက်တည်း WAV file တစ်ခုအဖြစ် ပေါင်းစည်းပေးသည်
+function mergeWavChunksBase64(audioBase64Chunks) {
+  if (audioBase64Chunks.length === 1) return audioBase64Chunks[0];
+
+  const parsed = audioBase64Chunks.map(b64 => parseWav(base64ToBytes(b64)));
+  const ref = parsed[0];
+
+  const gapSeconds = 0.25;
+  const gapBytes = Math.floor(ref.sampleRate * gapSeconds) * ref.channels * (ref.bitsPerSample / 8);
+  const gap = new Uint8Array(gapBytes); // silence (zero-filled)
+
+  let totalLen = 0;
+  for (let i = 0; i < parsed.length; i++) {
+    totalLen += parsed[i].dataBytes.length;
+    if (i < parsed.length - 1) totalLen += gap.length;
+  }
+
+  const merged = new Uint8Array(totalLen);
+  let pos = 0;
+  for (let i = 0; i < parsed.length; i++) {
+    merged.set(parsed[i].dataBytes, pos);
+    pos += parsed[i].dataBytes.length;
+    if (i < parsed.length - 1) {
+      merged.set(gap, pos);
+      pos += gap.length;
+    }
+  }
+
+  const header = buildWavHeader(merged.length, ref);
+  const finalBytes = new Uint8Array(header.length + merged.length);
+  finalBytes.set(header, 0);
+  finalBytes.set(merged, header.length);
+
+  return bytesToBase64(finalBytes);
+}
 
 async function handleGenerateStart(request, env, corsHeaders) {
   const body = await request.json();
-  const { userId, text, refAudioBase64, promptText, voiceType } = body;
+  const { userId, text, refAudioBase64, promptText, voiceType, voicePresetId } = body;
 
   if (!userId) {
     return json({ error: 'Missing userId' }, 400, corsHeaders);
@@ -795,36 +1373,60 @@ async function handleGenerateStart(request, env, corsHeaders) {
     );
   }
 
-  const input = { text: text.trim() };
-  if (refAudioBase64) {
-    input.reference_audio_base64 = refAudioBase64;
-    if (promptText && promptText.trim()) input.prompt_text = promptText.trim();
-  }
-  if (voiceType) input.voice_type = voiceType;
-
-  const runRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/run`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${env.RUNPOD_API_KEY}`,
-    },
-    body: JSON.stringify({ input }),
-  });
-
-  const runData = await runRes.json();
-  if (!runRes.ok || !runData.id) {
-    return json({ error: runData.error || 'RunPod request failed' }, 500, corsHeaders);
+  // Admin ကြိုတင် upload ထားတဲ့ voice preset ကို ရွေးထားရင် — အဲ့ဒီ preset ရဲ့ audio ကို reference အဖြစ်သုံးမည်
+  let finalRefAudio = refAudioBase64;
+  let finalPromptText = promptText;
+  if (voicePresetId) {
+    const preset = await env.DB.prepare('SELECT audio_base64, prompt_text FROM voice_presets WHERE id = ?1')
+      .bind(Number(voicePresetId))
+      .first();
+    if (!preset) {
+      return json({ error: 'ရွေးထားတဲ့ Voice Preset မတွေ့ပါ' }, 400, corsHeaders);
+    }
+    finalRefAudio = preset.audio_base64;
+    finalPromptText = (promptText && promptText.trim()) ? promptText.trim() : preset.prompt_text;
   }
 
-  // Job တင်ပြီးသွားမှသာ credits ကို နုတ်ပါ
-  await env.DB.prepare(
-    `UPDATE users SET credits = COALESCE(credits, 0) - ?1, updated_at = datetime('now') WHERE id = ?2`
-  )
-    .bind(cost, String(userId))
-    .run();
+  // Long text ကို safe-length chunk များအဖြစ် ပိုင်းပြီး RunPod job များစွာ ခွဲပို့မည်
+  // (chunk တစ်ခုတည်းရှိရင် ယခင်အတိုင်း job တစ်ခုတည်းသာ ဖြစ်မည်)
+  const textChunks = splitTextForTts(text.trim(), TTS_CHUNK_MAX_CHARS, voiceType);
+
+  const jobIds = [];
+  for (const chunkText of textChunks) {
+    const input = { text: chunkText };
+    if (finalRefAudio) {
+      input.reference_audio_base64 = finalRefAudio;
+      if (finalPromptText && finalPromptText.trim()) input.prompt_text = finalPromptText.trim();
+    }
+    if (voiceType) input.voice_type = voiceType;
+
+    const runRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/run`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${env.RUNPOD_API_KEY}`,
+      },
+      body: JSON.stringify({ input }),
+    });
+
+    const runData = await runRes.json();
+    if (!runRes.ok || !runData.id) {
+      return json({ error: runData.error || 'RunPod request failed' }, 500, corsHeaders);
+    }
+    jobIds.push(runData.id);
+  }
+
+  // Credits ကို job အောင်မြင်စွာ ပြီးမြောက်မှသာ နုတ်ပါမည် (handleGenerateStatus ထဲမှာ)
+  // — user တစ်ယောက် job မအောင်မြင်ခဲ့ရင် ဘာမှ ဆုံးရှုံးမှု မရှိစေရန်
+
+  // chunk တစ်ခုထက်ပိုရင် job id အားလုံးကို compound jobId (MULTI_JOB_PREFIX + ',' ဖြင့်ချိတ်ထား)
+  // အဖြစ် frontend ကို ပြန်ပေးမည် — handleGenerateStatus က ဒါကို မှတ်ပြီး status/audio ကို ပေါင်းစည်းမည်
+  const jobId = jobIds.length > 1 ? MULTI_JOB_PREFIX + jobIds.join(',') : jobIds[0];
+
+  await logRequestStart(env, { userId, jobId, source: 'miniapp', textLength: cost });
 
   return json(
-    { success: true, jobId: runData.id, cost, remainingCredits: currentCredits - cost },
+    { success: true, jobId, cost, remainingCredits: currentCredits },
     200,
     corsHeaders
   );
@@ -841,21 +1443,78 @@ async function handleGenerateStatus(request, env, corsHeaders) {
     return json({ error: 'RunPod environment variables missing' }, 500, corsHeaders);
   }
 
-  const statusRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/status/${jobId}`, {
-    headers: { Authorization: `Bearer ${env.RUNPOD_API_KEY}` },
-  });
-  const data = await statusRes.json();
+  const data = jobId.startsWith(MULTI_JOB_PREFIX)
+    ? await fetchMultiJobStatus(jobId.slice(MULTI_JOB_PREFIX.length).split(','), env)
+    : await fetchSingleJobStatus(jobId, env);
 
-  // Job fail/cancel ဖြစ်ရင် နုတ်ထားတဲ့ credits ကို ပြန်ထည့်ပေးမည်
-  if ((data.status === 'FAILED' || data.status === 'CANCELLED') && userId && cost) {
+  // Job အောင်မြင်စွာ ပြီးမြောက် (audio ထွက်) မှသာ credits ကို နုတ်ပါမည်
+  if (data.status === 'COMPLETED' && userId && cost) {
     await env.DB.prepare(
-      `UPDATE users SET credits = COALESCE(credits, 0) + ?1, updated_at = datetime('now') WHERE id = ?2`
+      `UPDATE users SET credits = COALESCE(credits, 0) - ?1, updated_at = datetime('now') WHERE id = ?2`
     )
       .bind(Number(cost), String(userId))
       .run();
+    await logRequestUpdate(env, jobId, { status: 'COMPLETED', creditsCharged: cost, errorMessage: null });
+  } else if (data.status === 'FAILED') {
+    await logRequestUpdate(env, jobId, { status: 'FAILED', creditsCharged: 0, errorMessage: data.error || 'RunPod ကနေ error ပြန်ခဲ့သည်' });
+  } else if (data.status === 'CANCELLED') {
+    await logRequestUpdate(env, jobId, { status: 'CANCELLED', creditsCharged: 0, errorMessage: null });
+  } else if (data.status === 'IN_PROGRESS') {
+    await logRequestUpdate(env, jobId, { status: 'IN_PROGRESS', creditsCharged: 0, errorMessage: null });
   }
 
   return json(data, 200, corsHeaders);
+}
+
+// ---- single job status (RunPod) --------------------------------------------
+
+async function fetchSingleJobStatus(jobId, env) {
+  const statusRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/status/${jobId}`, {
+    headers: { Authorization: `Bearer ${env.RUNPOD_API_KEY}` },
+  });
+  return await statusRes.json();
+}
+
+// ---- multiple (chunked) job status: poll all, merge audio once all COMPLETED ----
+
+async function fetchMultiJobStatus(jobIds, env) {
+  const results = await Promise.all(jobIds.map(id => fetchSingleJobStatus(id, env)));
+
+  const failed = results.find(r => r.status === 'FAILED');
+  if (failed) {
+    return { id: jobIds[0], status: 'FAILED', error: failed.error || 'Background request တစ်ခု fail ဖြစ်သွားပါသည်' };
+  }
+  const cancelled = results.find(r => r.status === 'CANCELLED');
+  if (cancelled) {
+    return { id: jobIds[0], status: 'CANCELLED' };
+  }
+
+  const allCompleted = results.every(r => r.status === 'COMPLETED');
+  if (!allCompleted) {
+    const anyInProgress = results.some(r => r.status === 'IN_PROGRESS');
+    return { id: jobIds[0], status: anyInProgress ? 'IN_PROGRESS' : 'IN_QUEUE' };
+  }
+
+  // Chunk အားလုံး ပြီးပါပြီ — audio (WAV) များကို original order အတိုင်း ပေါင်းစည်းမည်
+  try {
+    const audioChunks = results.map(r => r.output && r.output.audio_base64).filter(Boolean);
+    if (audioChunks.length !== results.length) {
+      return { id: jobIds[0], status: 'FAILED', error: 'Background request တစ်ခုက audio ပြန်မပေးပါ' };
+    }
+    const mergedAudio = mergeWavChunksBase64(audioChunks);
+    const first = results[0].output;
+    return {
+      id: jobIds[0],
+      status: 'COMPLETED',
+      output: {
+        audio_base64: mergedAudio,
+        sample_rate: first.sample_rate,
+        format: first.format || 'wav',
+      },
+    };
+  } catch (e) {
+    return { id: jobIds[0], status: 'FAILED', error: 'Audio segment များ ပေါင်းစည်းရာတွင် error ဖြစ်ပွားသည်: ' + e.message };
+  }
 }
 
 // ===========================================================================
@@ -922,6 +1581,31 @@ async function handleProfileGet(request, env, corsHeaders) {
   );
 }
 
+// ---- Request history: user ကိုယ်တိုင် သူ့ရဲ့ request log များကို ကြည့်ရန် ----
+
+async function handleProfileRequestsList(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { userId } = body;
+
+  if (!userId) {
+    return json({ error: 'Missing userId' }, 400, corsHeaders);
+  }
+
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT job_id, source, text_length, status, credits_charged, error_message, created_at
+       FROM request_logs WHERE user_id = ?1 ORDER BY created_at DESC LIMIT 50`
+    )
+      .bind(String(userId))
+      .all();
+
+    return json({ success: true, requests: results }, 200, corsHeaders);
+  } catch (e) {
+    // request_logs table မရှိသေးရင် empty list ပြန်ပေးမည် (feature ကို gracefully skip)
+    return json({ success: true, requests: [] }, 200, corsHeaders);
+  }
+}
+
 async function handleApiKeyGenerate(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
   const { userId } = body;
@@ -973,7 +1657,7 @@ async function handleApiKeyRevoke(request, env, corsHeaders) {
 
 async function handleApiV1Generate(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
-  const { apiKey, text, refAudioBase64, promptText, voiceType } = body;
+  const { apiKey, text, refAudioBase64, promptText, voiceType, voicePresetId } = body;
 
   if (!apiKey) {
     return json({ error: 'Missing apiKey' }, 401, corsHeaders);
@@ -1008,9 +1692,22 @@ async function handleApiV1Generate(request, env, corsHeaders) {
   }
 
   const input = { text: text.trim() };
-  if (refAudioBase64) {
-    input.reference_audio_base64 = refAudioBase64;
-    if (promptText && promptText.trim()) input.prompt_text = promptText.trim();
+  // Admin ကြိုတင် upload ထားတဲ့ voice preset ကို ရွေးထားရင် — အဲ့ဒီ preset ရဲ့ audio ကို reference အဖြစ်သုံးမည်
+  let finalRefAudio = refAudioBase64;
+  let finalPromptText = promptText;
+  if (voicePresetId) {
+    const preset = await env.DB.prepare('SELECT audio_base64, prompt_text FROM voice_presets WHERE id = ?1')
+      .bind(Number(voicePresetId))
+      .first();
+    if (!preset) {
+      return json({ error: 'ရွေးထားတဲ့ Voice Preset မတွေ့ပါ' }, 400, corsHeaders);
+    }
+    finalRefAudio = preset.audio_base64;
+    finalPromptText = (promptText && promptText.trim()) ? promptText.trim() : preset.prompt_text;
+  }
+  if (finalRefAudio) {
+    input.reference_audio_base64 = finalRefAudio;
+    if (finalPromptText && finalPromptText.trim()) input.prompt_text = finalPromptText.trim();
   }
   if (voiceType) input.voice_type = voiceType;
 
@@ -1028,14 +1725,12 @@ async function handleApiV1Generate(request, env, corsHeaders) {
     return json({ error: runData.error || 'RunPod request failed' }, 500, corsHeaders);
   }
 
-  await env.DB.prepare(
-    `UPDATE users SET credits = COALESCE(credits, 0) - ?1, updated_at = datetime('now') WHERE id = ?2`
-  )
-    .bind(cost, user.id)
-    .run();
+  // Credits ကို job အောင်မြင်စွာ ပြီးမြောက်မှသာ နုတ်ပါမည် (handleApiV1GenerateStatus ထဲမှာ)
+
+  await logRequestStart(env, { userId: user.id, jobId: runData.id, source: 'api', textLength: cost });
 
   return json(
-    { success: true, jobId: runData.id, cost, remainingCredits: currentCredits - cost },
+    { success: true, jobId: runData.id, cost, remainingCredits: currentCredits },
     200,
     corsHeaders
   );
@@ -1066,12 +1761,20 @@ async function handleApiV1GenerateStatus(request, env, corsHeaders) {
   });
   const data = await statusRes.json();
 
-  if ((data.status === 'FAILED' || data.status === 'CANCELLED') && cost) {
+  // Job အောင်မြင်စွာ ပြီးမြောက် (audio ထွက်) မှသာ credits ကို နုတ်ပါမည်
+  if (data.status === 'COMPLETED' && cost) {
     await env.DB.prepare(
-      `UPDATE users SET credits = COALESCE(credits, 0) + ?1, updated_at = datetime('now') WHERE id = ?2`
+      `UPDATE users SET credits = COALESCE(credits, 0) - ?1, updated_at = datetime('now') WHERE id = ?2`
     )
       .bind(Number(cost), user.id)
       .run();
+    await logRequestUpdate(env, jobId, { status: 'COMPLETED', creditsCharged: cost, errorMessage: null });
+  } else if (data.status === 'FAILED') {
+    await logRequestUpdate(env, jobId, { status: 'FAILED', creditsCharged: 0, errorMessage: data.error || 'RunPod ကနေ error ပြန်ခဲ့သည်' });
+  } else if (data.status === 'CANCELLED') {
+    await logRequestUpdate(env, jobId, { status: 'CANCELLED', creditsCharged: 0, errorMessage: null });
+  } else if (data.status === 'IN_PROGRESS') {
+    await logRequestUpdate(env, jobId, { status: 'IN_PROGRESS', creditsCharged: 0, errorMessage: null });
   }
 
   return json(data, 200, corsHeaders);
@@ -1455,6 +2158,8 @@ function getAdminDashboardHtml() {
     .msg { font-size: 12px; margin-top: 8px; }
     .msg.ok { color: #4a5d4a; }
     .msg.err { color: #d9534f; }
+    a.back { font-size: 12px; color: #666; text-decoration: none; }
+    a.back:hover { color: #1a1a1a; }
   </style>
 </head>
 <body>
@@ -1462,18 +2167,27 @@ function getAdminDashboardHtml() {
     <div style="font-size:22px;">🎙️</div>
     <h1>Ko Paing AI Voice Studio — Admin</h1>
   </div>
+  <a href="/studio" class="back">← Back to User Panel</a>
 
-  <div class="tabs">
+  <div class="tabs" style="margin-top:16px;">
     <div class="tab active" data-tab="users">Users</div>
+    <div class="tab" data-tab="requests">Requests</div>
+    <div class="tab" data-tab="voices">Voices</div>
     <div class="tab" data-tab="plans">Plans</div>
     <div class="tab" data-tab="settings">Settings</div>
     <div class="tab" data-tab="purchases">Purchases</div>
+    <div class="tab" data-tab="notify">Notify User</div>
+    <div class="tab" data-tab="broadcast">Broadcast</div>
   </div>
 
   <div class="panel active" id="panel-users"><div class="empty">Loading…</div></div>
+  <div class="panel" id="panel-requests"></div>
+  <div class="panel" id="panel-voices"></div>
   <div class="panel" id="panel-plans"></div>
   <div class="panel" id="panel-settings"></div>
   <div class="panel" id="panel-purchases"><div class="empty">Loading…</div></div>
+  <div class="panel" id="panel-notify"></div>
+  <div class="panel" id="panel-broadcast"></div>
 
   <script>
     const token = sessionStorage.getItem('admin_token');
@@ -1488,6 +2202,10 @@ function getAdminDashboardHtml() {
         if (tab.dataset.tab === 'plans') loadPlans();
         if (tab.dataset.tab === 'settings') loadSettings();
         if (tab.dataset.tab === 'purchases') loadPurchases();
+        if (tab.dataset.tab === 'notify') loadNotifyPanel();
+        if (tab.dataset.tab === 'broadcast') loadBroadcastPanel();
+        if (tab.dataset.tab === 'requests') loadRequestsPanel();
+        if (tab.dataset.tab === 'voices') loadVoicePresetsPanel();
       });
     });
 
@@ -1521,7 +2239,12 @@ function getAdminDashboardHtml() {
           <td>\${u.username ? '@' + u.username : '-'}</td>
           <td>\${u.credits ?? 0}</td>
           <td>\${u.is_admin ? '<span class="badge">ADMIN</span>' : ''} \${u.is_banned ? '<span class="badge banned">BANNED</span>' : ''}</td>
-          <td><button class="btn small \${u.is_banned ? 'ghost' : 'danger'}" onclick="toggleBan('\${u.id}', \${u.is_banned ? 0 : 1})">\${u.is_banned ? 'Unban' : 'Ban'}</button></td>
+          <td style="white-space:nowrap;">
+            <input type="number" id="creditAmt-\${u.id}" placeholder="±amount" style="width:90px; padding:6px 8px; font-size:12px; border:1px solid #ccc; border-radius:4px; margin-right:4px;">
+            <button class="btn small ghost" onclick="adjustCredits('\${u.id}')">Add Credits</button>
+            <button class="btn small ghost" onclick="viewUserRequests('\${u.id}')">Requests</button>
+            <button class="btn small \${u.is_banned ? 'ghost' : 'danger'}" onclick="toggleBan('\${u.id}', \${u.is_banned ? 0 : 1})">\${u.is_banned ? 'Unban' : 'Ban'}</button>
+          </td>
         </tr>
       \`).join('');
       wrap.innerHTML = \`<table><thead><tr><th>ID</th><th>Name</th><th>Username</th><th>Credits</th><th>Status</th><th>Action</th></tr></thead><tbody>\${rows}</tbody></table>\`;
@@ -1530,6 +2253,225 @@ function getAdminDashboardHtml() {
     async function toggleBan(userId, banned) {
       const { ok, data } = await api('/api/admin/users/ban', { userId, banned: !!banned });
       if (ok && data.success) loadUsers();
+      else alert(data.error || 'Failed');
+    }
+
+    async function adjustCredits(userId) {
+      const input = document.getElementById('creditAmt-' + userId);
+      const amount = Number(input.value);
+      if (!amount) { alert('Amount ကို ဂဏန်းအနေနဲ့ ထည့်ပေးပါ (နုတ်ချင်ရင် -100 လိုမျိုး ထည့်နိုင်ပါသည်)'); return; }
+      const { ok, data } = await api('/api/admin/users/credits', { userId, amount });
+      if (ok && data.success) {
+        input.value = '';
+        loadUsers();
+      } else {
+        alert(data.error || 'Failed');
+      }
+    }
+
+    // ---------------- REQUESTS ----------------
+    let pendingRequestsFilter = '';
+
+    function viewUserRequests(userId) {
+      pendingRequestsFilter = userId;
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+      const tab = document.querySelector('.tab[data-tab="requests"]');
+      tab.classList.add('active');
+      document.getElementById('panel-requests').classList.add('active');
+      loadRequestsPanel();
+    }
+
+    function requestStatusBadge(status) {
+      const map = {
+        COMPLETED: ['badge', '#1a7a44', 'Completed'],
+        FAILED: ['badge', '#c0392b', 'Failed'],
+        CANCELLED: ['badge', '#888', 'Cancelled'],
+        IN_PROGRESS: ['badge', '#a17a1c', 'In Progress'],
+        IN_QUEUE: ['badge', '#a17a1c', 'Queued'],
+      };
+      const [cls, color, label] = map[status] || ['badge', '#888', status || 'Unknown'];
+      return '<span class="' + cls + '" style="background:' + color + ';">' + label + '</span>';
+    }
+
+    async function loadRequestsPanel() {
+      const wrap = document.getElementById('panel-requests');
+      wrap.innerHTML = \`
+        <div class="card">
+          <h3>Filter</h3>
+          <div class="row2">
+            <div class="field" style="margin-bottom:0;">
+              <label>User ID (blank = all users)</label>
+              <input id="reqFilterUserId" value="\${pendingRequestsFilter}" placeholder="Telegram User ID">
+            </div>
+          </div>
+          <button class="btn small" style="margin-top:10px;" onclick="applyRequestsFilter()">Search</button>
+          <button class="btn small ghost" style="margin-top:10px;" onclick="clearRequestsFilter()">Clear</button>
+        </div>
+        <div id="requestsTableWrap"><div class="empty">Loading…</div></div>
+      \`;
+      await fetchAndRenderRequests();
+    }
+
+    function applyRequestsFilter() {
+      pendingRequestsFilter = document.getElementById('reqFilterUserId').value.trim();
+      fetchAndRenderRequests();
+    }
+
+    function clearRequestsFilter() {
+      pendingRequestsFilter = '';
+      document.getElementById('reqFilterUserId').value = '';
+      fetchAndRenderRequests();
+    }
+
+    async function fetchAndRenderRequests() {
+      const wrap = document.getElementById('requestsTableWrap');
+      wrap.innerHTML = '<div class="empty">Loading…</div>';
+      const { ok, data } = await api('/api/admin/requests/list', pendingRequestsFilter ? { userId: pendingRequestsFilter } : {});
+      if (!ok || !data.success) {
+        wrap.innerHTML = '<div class="error">' + (data.error || 'Failed to load requests') + '</div>';
+        return;
+      }
+      if (!data.requests.length) {
+        wrap.innerHTML = '<div class="empty">Request မတွေ့ပါ</div>';
+        return;
+      }
+      const rows = data.requests.map(r => \`
+        <tr>
+          <td>\${r.user_name || '-'}\${r.user_username ? ' (@' + r.user_username + ')' : ''}<br><span style="color:#999;">\${r.user_id}</span></td>
+          <td>\${r.source === 'api' ? 'Public API' : 'Voice Studio'}</td>
+          <td>\${r.text_length}</td>
+          <td>\${requestStatusBadge(r.status)}</td>
+          <td>\${r.credits_charged}</td>
+          <td style="max-width:200px; white-space:normal; color:#c0392b;">\${r.error_message || '-'}</td>
+          <td>\${new Date(r.created_at + 'Z').toLocaleString()}</td>
+        </tr>
+      \`).join('');
+      wrap.innerHTML = \`<table><thead><tr><th>User</th><th>Source</th><th>Chars</th><th>Status</th><th>Credits Used</th><th>Error</th><th>Time</th></tr></thead><tbody>\${rows}</tbody></table>\`;
+    }
+
+    // ---------------- VOICE PRESETS ----------------
+    let newPresetAudioBase64 = null;
+
+    async function loadVoicePresetsPanel() {
+      const wrap = document.getElementById('panel-voices');
+      wrap.innerHTML = \`
+        <div class="card">
+          <h3>Voice အသစ် Upload လုပ်ရန်</h3>
+          <p style="font-size:12.5px; color:#666; margin-top:0;">Audio file တစ်ခု upload လုပ်ပြီး နာမည်ပေးပါ (ဥပမာ — Audio Book, News Voice)။ User တွေက Voice Studio ထဲက dropdown ကနေ ဒီနာမည်နဲ့ ရွေးနိုင်ပြီး အဲ့ဒီအသံအတိုင်း generate ဖြစ်ပါမည်။</p>
+          <div class="field">
+            <label>Voice Name</label>
+            <input id="presetName" placeholder="e.g. Audio Book">
+          </div>
+          <div class="field">
+            <label>Audio File (WAV / MP3, စက္ကန့်အနည်းငယ်ရှိတဲ့ file တို)</label>
+            <input type="file" id="presetAudioFile" accept="audio/*">
+            <div id="presetFileStatus" style="font-size:11.5px; color:#999; margin-top:6px;"></div>
+          </div>
+          <div class="field">
+            <label>Transcript <span style="color:#999; font-weight:400;">(optional — sample ထဲက စာသား, cloning quality တိုးစေသည်)</span></label>
+            <input id="presetPromptText" placeholder="Sample audio ထဲမှာ ပြောထားတဲ့ စာသား">
+          </div>
+          <button class="btn small" onclick="createVoicePreset()">Upload Voice</button>
+          <div class="msg" id="presetCreateMsg"></div>
+        </div>
+        <div id="presetsListWrap"><div class="empty">Loading…</div></div>
+      \`;
+
+      document.getElementById('presetAudioFile').addEventListener('change', (e) => {
+        const f = e.target.files[0];
+        newPresetAudioBase64 = null;
+        if (!f) return;
+        const statusEl = document.getElementById('presetFileStatus');
+        if (f.size > 3_000_000) {
+          statusEl.textContent = 'File ကြီးလွန်းပါသည် (max ~3MB) — file တို/compress လုပ်ထားတဲ့ file သုံးပါ';
+          statusEl.style.color = '#c0392b';
+          e.target.value = '';
+          return;
+        }
+        statusEl.textContent = 'Reading ' + f.name + '…';
+        statusEl.style.color = '#999';
+        const reader = new FileReader();
+        reader.onload = () => {
+          newPresetAudioBase64 = reader.result.split(',')[1];
+          statusEl.textContent = f.name + ' ✓ ready to upload';
+          statusEl.style.color = '#1a7a44';
+        };
+        reader.readAsDataURL(f);
+      });
+
+      await fetchAndRenderVoicePresets();
+    }
+
+    async function createVoicePreset() {
+      const name = document.getElementById('presetName').value.trim();
+      const promptText = document.getElementById('presetPromptText').value.trim();
+      const msgEl = document.getElementById('presetCreateMsg');
+      msgEl.className = 'msg';
+      msgEl.textContent = '';
+
+      if (!name) { msgEl.className = 'msg err'; msgEl.textContent = 'Voice Name ထည့်ပေးပါ'; return; }
+      if (!newPresetAudioBase64) { msgEl.className = 'msg err'; msgEl.textContent = 'Audio file ရွေးပေးပါ'; return; }
+
+      const { ok, data } = await api('/api/admin/voice-presets/create', {
+        name, audioBase64: newPresetAudioBase64, promptText: promptText || undefined
+      });
+      if (ok && data.success) {
+        msgEl.className = 'msg ok'; msgEl.textContent = 'Upload ပြီးပါပြီ!';
+        document.getElementById('presetName').value = '';
+        document.getElementById('presetPromptText').value = '';
+        document.getElementById('presetAudioFile').value = '';
+        document.getElementById('presetFileStatus').textContent = '';
+        newPresetAudioBase64 = null;
+        fetchAndRenderVoicePresets();
+      } else {
+        msgEl.className = 'msg err'; msgEl.textContent = data.error || 'Failed';
+      }
+    }
+
+    async function fetchAndRenderVoicePresets() {
+      const wrap = document.getElementById('presetsListWrap');
+      wrap.innerHTML = '<div class="empty">Loading…</div>';
+      const { ok, data } = await api('/api/admin/voice-presets/list');
+      if (!ok || !data.success) {
+        wrap.innerHTML = '<div class="error">' + (data.error || 'Failed to load') + '</div>';
+        return;
+      }
+      if (!data.presets.length) {
+        wrap.innerHTML = '<div class="empty">Voice preset မရှိသေးပါ</div>';
+        return;
+      }
+      const rows = data.presets.map(p => \`
+        <tr>
+          <td>\${p.name}</td>
+          <td>\${p.prompt_text || '-'}</td>
+          <td>\${new Date(p.created_at + 'Z').toLocaleString()}</td>
+          <td style="white-space:nowrap;">
+            <button class="btn small ghost" onclick="previewVoicePreset(\${p.id})">Play</button>
+            <button class="btn small danger" onclick="deleteVoicePreset(\${p.id})">Delete</button>
+          </td>
+        </tr>
+        <tr id="presetAudioRow-\${p.id}" style="display:none;"><td colspan="4"><audio id="presetAudio-\${p.id}" controls style="width:100%;"></audio></td></tr>
+      \`).join('');
+      wrap.innerHTML = \`<table><thead><tr><th>Name</th><th>Transcript</th><th>Uploaded</th><th>Action</th></tr></thead><tbody>\${rows}</tbody></table>\`;
+    }
+
+    async function previewVoicePreset(id) {
+      const row = document.getElementById('presetAudioRow-' + id);
+      const audioEl = document.getElementById('presetAudio-' + id);
+      if (row.style.display !== 'none') { row.style.display = 'none'; return; }
+      if (!audioEl.src) {
+        const { ok, data } = await api('/api/admin/voice-presets/get', { id });
+        if (!ok || !data.success) { alert(data.error || 'Failed to load audio'); return; }
+        audioEl.src = 'data:audio/wav;base64,' + data.preset.audio_base64;
+      }
+      row.style.display = '';
+    }
+
+    async function deleteVoicePreset(id) {
+      if (!confirm('ဒီ voice preset ကို ဖျက်မှာ သေချာပါသလား?')) return;
+      const { ok, data } = await api('/api/admin/voice-presets/delete', { id });
+      if (ok && data.success) fetchAndRenderVoicePresets();
       else alert(data.error || 'Failed');
     }
 
@@ -1751,6 +2693,92 @@ function getAdminDashboardHtml() {
       if (ok && data.success) loadPurchases(); else alert(data.error || 'Failed');
     }
 
+    function loadNotifyPanel() {
+      const wrap = document.getElementById('panel-notify');
+      wrap.innerHTML = \`
+        <div class="card">
+          <h3>User ကို Telegram Message ပို့ပါ</h3>
+          <div class="field"><label>User Telegram ID (Users tab ထဲက ID ကို copy ယူနိုင်ပါသည်)</label>
+            <input id="notifyUserId" placeholder="e.g. 123456789"></div>
+          <div class="field"><label>Message (Server ပြုပြင်နေချိန်, အသိပေးစာ စသည်)</label>
+            <textarea id="notifyMessage" rows="5" placeholder="ဥပမာ - Server ကို မိနစ်အနည်းငယ် ပြုပြင်နေပါသဖြင့် ခဏအတွင်း ပြန်လည် အသုံးပြုနိုင်ပါမည်။"></textarea></div>
+          <button class="btn" onclick="sendUserNotification()">Send</button>
+          <div class="msg" id="notifyMsg"></div>
+        </div>
+      \`;
+    }
+
+    async function sendUserNotification() {
+      const userId = document.getElementById('notifyUserId').value.trim();
+      const message = document.getElementById('notifyMessage').value.trim();
+      const msg = document.getElementById('notifyMsg');
+      if (!userId || !message) {
+        msg.textContent = 'User ID နဲ့ Message နှစ်ခုစလုံး ဖြည့်ပေးပါ။';
+        msg.className = 'msg err';
+        return;
+      }
+      msg.textContent = 'ပို့နေသည်…';
+      msg.className = 'msg';
+      const { ok, data } = await api('/api/admin/notify-user', { userId, message });
+      if (ok && data.success) {
+        msg.textContent = 'ပို့ပြီးပါပြီ ✓';
+        msg.className = 'msg ok';
+        document.getElementById('notifyMessage').value = '';
+      } else {
+        msg.textContent = data.error || 'ပို့လို့ မရပါ';
+        msg.className = 'msg err';
+      }
+    }
+
+    let broadcastImageBase64 = null;
+
+    function loadBroadcastPanel() {
+      const wrap = document.getElementById('panel-broadcast');
+      wrap.innerHTML = \`
+        <div class="card">
+          <h3>User အားလုံးကို Telegram Broadcast ပို့ပါ</h3>
+          <div class="field"><label>Title (optional)</label>
+            <input id="broadcastTitle" placeholder="e.g. Server Maintenance Notice"></div>
+          <div class="field"><label>Message</label>
+            <textarea id="broadcastMessage" rows="5" placeholder="ဥပမာ - Server ကို မိနစ်အနည်းငယ် ပြုပြင်နေပါသဖြင့် ခဏအတွင်း ပြန်လည် အသုံးပြုနိုင်ပါမည်။"></textarea></div>
+          <div class="field"><label>Image (optional)</label>
+            <input id="broadcastImage" type="file" accept="image/*"></div>
+          <button class="btn" onclick="sendBroadcast()">Send to All Users</button>
+          <div class="msg" id="broadcastMsg"></div>
+        </div>
+      \`;
+      document.getElementById('broadcastImage').addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        broadcastImageBase64 = null;
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => { broadcastImageBase64 = reader.result.split(',')[1]; };
+        reader.readAsDataURL(file);
+      });
+    }
+
+    async function sendBroadcast() {
+      const title = document.getElementById('broadcastTitle').value.trim();
+      const message = document.getElementById('broadcastMessage').value.trim();
+      const msg = document.getElementById('broadcastMsg');
+      if (!message) {
+        msg.textContent = 'Message ဖြည့်ပေးပါ။';
+        msg.className = 'msg err';
+        return;
+      }
+      if (!confirm('User အားလုံးကို ဒီ message ပို့မှာ သေချာပါသလား?')) return;
+      msg.textContent = 'User အားလုံးကို ပို့နေသည်…';
+      msg.className = 'msg';
+      const { ok, data } = await api('/api/admin/broadcast', { title, message, imageBase64: broadcastImageBase64 });
+      if (ok && data.success) {
+        msg.textContent = \`ပို့ပြီးပါပြီ — Sent: \${data.sent} / \${data.total} (Failed: \${data.failed})\`;
+        msg.className = 'msg ok';
+      } else {
+        msg.textContent = data.error || 'ပို့လို့ မရပါ';
+        msg.className = 'msg err';
+      }
+    }
+
     loadUsers();
   </script>
 </body>
@@ -1773,15 +2801,20 @@ ${FAVICON}
   @import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;1,9..144,500&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap');
 
   :root{
-    --ink:      #201f1c;
-    --paper:    #f7f4ee;
-    --panel:    #fffdf8;
-    --line:     #e4ddcc;
-    --moss:     #4a5d4a;
-    --moss-dim: #7c8c7c;
-    --wax:      #b5482f;
-    --wax-dim:  #d9a190;
-    --shadow:   0 1px 0 rgba(28,27,25,0.05);
+    --ink:      #171a17;
+    --paper:    #ffffff;
+    --panel:    #ffffff;
+    --line:     #e0e6e1;
+    --moss:     #1a7a44;
+    --moss-dim: #8fbfa2;
+    --moss-soft:#eaf7ee;
+    --wax:      #c0392b;
+    --wax-dim:  #e3a99c;
+    --radius-lg: 22px;
+    --radius-md: 14px;
+    --radius-sm: 10px;
+    --shadow-card: 0 1px 2px rgba(23,26,23,0.04), 0 16px 34px -14px rgba(23,26,23,0.16);
+    --shadow-soft: 0 8px 20px -10px rgba(23,26,23,0.14);
   }
   *{ box-sizing:border-box; }
   body{
@@ -1793,10 +2826,11 @@ ${FAVICON}
   }
   body::before{
     content:"";
-    position:fixed; inset:0;
-    background-image:repeating-radial-gradient(circle at 50% -40%, transparent 0 68px, rgba(28,27,25,0.018) 69px 70px);
-    pointer-events:none;
-    z-index:0;
+    position:fixed; inset:0; z-index:0; pointer-events:none;
+    background-image:
+      linear-gradient(rgba(26,122,68,0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(26,122,68,0.05) 1px, transparent 1px);
+    background-size:26px 26px;
   }
   .wrap{ position:relative; z-index:1; max-width:720px; margin:0 auto; padding:28px 24px 90px; }
 
@@ -1810,55 +2844,53 @@ ${FAVICON}
     color:#8a8374; text-decoration:none; padding-bottom:3px;
     border-bottom:1px solid transparent; transition:color .15s ease, border-color .15s ease;
   }
-  .masthead-nav a:hover{ color:var(--wax); border-color:var(--wax); }
+  .masthead-nav a:hover{ color:var(--moss); border-color:var(--moss); }
 
   header{ margin-bottom:38px; }
   .eyebrow{
     font-family:'IBM Plex Mono', monospace;
-    font-size:11px; letter-spacing:0.14em; text-transform:uppercase; color:var(--wax);
+    font-size:11px; letter-spacing:0.14em; text-transform:uppercase; color:var(--moss);
     display:flex; align-items:center; gap:8px; margin-bottom:14px;
   }
   .eyebrow .dot{ width:6px; height:6px; border-radius:50%; background:var(--moss-dim); display:inline-block; }
-  .eyebrow .dot.live{ background:var(--wax); box-shadow:0 0 0 3px rgba(181,72,47,0.15); }
+  .eyebrow .dot.live{ background:var(--moss); box-shadow:0 0 0 3px rgba(26,122,68,0.15); }
   .head-row{ display:flex; justify-content:space-between; align-items:flex-end; gap:20px; }
   h1{
     font-family:'Fraunces', serif; font-optical-sizing:auto; font-weight:600;
     font-size:clamp(28px, 5vw, 38px); line-height:1.05; margin:0 0 8px; letter-spacing:-0.01em;
   }
   .sub{ font-size:14px; color:#57534a; max-width:44ch; line-height:1.55; }
-  .balance{ flex-shrink:0; text-align:right; padding-bottom:2px; }
+  .balance{
+    flex-shrink:0; text-align:center; background:var(--moss-soft); border-radius:var(--radius-md);
+    padding:10px 20px;
+  }
   .balance-num{
-    display:block; font-family:'Fraunces', serif; font-weight:600; font-size:26px;
+    display:block; font-family:'Fraunces', serif; font-weight:600; font-size:24px;
     color:var(--moss); line-height:1;
   }
   .balance-label{
     display:block; font-family:'IBM Plex Mono', monospace; font-size:9.5px; letter-spacing:0.12em;
-    text-transform:uppercase; color:#a39c8c; margin-top:5px;
+    text-transform:uppercase; color:#7c9484; margin-top:5px;
   }
 
-  /* ---- the session sheet: numbered stages joined by a marginal spine ---- */
+  /* ---- the session sheet: stacked stage cards ---- */
   .reel{ position:relative; }
-  .stage{ display:flex; gap:18px; position:relative; }
-  .stage + .stage{ margin-top:34px; }
-  .spine{ width:30px; flex-shrink:0; position:relative; padding-top:2px; }
-  .spine .num{
-    font-family:'Fraunces', serif; font-style:italic; font-weight:500;
-    font-size:22px; color:var(--wax-dim); line-height:1; display:block;
+  .stage{ position:relative; }
+  .stage + .stage{ margin-top:24px; }
+  .stage-body{
+    background:var(--panel); border:none; border-radius:var(--radius-lg);
+    box-shadow:var(--shadow-card); overflow:hidden;
   }
-  .stage:not(:last-child) .spine::after{
-    content:""; position:absolute; top:34px; bottom:-34px; left:11px; width:1px; background:var(--line);
-  }
-  .stage-body{ flex:1; min-width:0; background:var(--panel); border:1px solid var(--line); }
   .stage-head{
-    padding:16px 20px 14px; border-bottom:1px solid var(--line);
+    padding:18px 22px 16px; background:var(--moss);
     display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap;
   }
-  .stage-head h2{ font-family:'Fraunces', serif; font-weight:600; font-size:17px; margin:0; }
+  .stage-head h2{ font-family:'Fraunces', serif; font-weight:600; font-size:17px; margin:0; color:#fff; }
   .stage-hint{
     font-family:'IBM Plex Mono', monospace; font-size:10.5px; letter-spacing:0.04em;
-    color:#a39c8c; text-transform:none;
+    color:rgba(255,255,255,0.75); text-transform:none;
   }
-  .stage-inner{ padding:20px; }
+  .stage-inner{ padding:22px; }
 
   label{
     display:flex; align-items:baseline; justify-content:space-between;
@@ -1867,37 +2899,38 @@ ${FAVICON}
   }
   label .req{ color:var(--wax); }
   textarea{
-    width:100%; background:transparent; border:none; border-bottom:1px solid var(--line);
-    padding:8px 0 10px; font-family:'Fraunces', serif; font-size:17px; color:var(--ink);
-    outline:none; resize:vertical; min-height:84px; line-height:1.5; transition:border-color .15s ease;
+    width:100%; background:#fff; border:1px solid var(--line); border-radius:var(--radius-md);
+    padding:12px 14px; font-family:'Fraunces', serif; font-size:17px; color:var(--ink);
+    outline:none; resize:vertical; min-height:84px; line-height:1.5;
+    transition:border-color .15s ease, box-shadow .15s ease;
   }
-  textarea:focus{ border-color:var(--moss); }
+  textarea:focus{ border-color:var(--moss); box-shadow:0 0 0 4px rgba(26,122,68,0.12); }
   textarea::placeholder{ color:#b7b0a2; }
   input[type="text"]{
-    width:100%; background:transparent; border:none; border-bottom:1px solid var(--line);
-    padding:8px 0 10px; font-family:'Inter', sans-serif; font-size:15px; color:var(--ink);
-    outline:none; transition:border-color .15s ease;
+    width:100%; background:#fff; border:1px solid var(--line); border-radius:var(--radius-md);
+    padding:11px 14px; font-family:'Inter', sans-serif; font-size:15px; color:var(--ink);
+    outline:none; transition:border-color .15s ease, box-shadow .15s ease;
   }
-  input[type="text"]:focus{ border-color:var(--moss); }
+  input[type="text"]:focus{ border-color:var(--moss); box-shadow:0 0 0 4px rgba(26,122,68,0.12); }
   input::placeholder{ color:#b7b0a2; }
   select{
-    width:100%; background:transparent; border:none; border-bottom:1px solid var(--line);
-    padding:8px 0 10px; font-family:'Inter', sans-serif; font-size:14px; color:var(--ink);
-    outline:none; transition:border-color .15s ease;
+    width:100%; background:#fff; border:1px solid var(--line); border-radius:var(--radius-md);
+    padding:11px 14px; font-family:'Inter', sans-serif; font-size:14px; color:var(--ink);
+    outline:none; transition:border-color .15s ease, box-shadow .15s ease;
   }
-  select:focus{ border-color:var(--moss); }
+  select:focus{ border-color:var(--moss); box-shadow:0 0 0 4px rgba(26,122,68,0.12); }
   .voicetype{ margin-top:20px; }
   .charcount{ text-align:right; font-family:'IBM Plex Mono', monospace; font-size:11px; color:#a39c8c; margin-top:6px; }
   .charcount.over{ color:var(--wax); }
 
   .dropzone{
-    border:1px dashed #cfc7b6; border-radius:2px; padding:18px; display:flex; align-items:center;
+    border:1.5px dashed #cfc7b6; border-radius:var(--radius-md); padding:18px; display:flex; align-items:center;
     gap:14px; cursor:pointer; transition:border-color .15s ease, background .15s ease;
   }
-  .dropzone:hover, .dropzone.drag{ border-color:var(--moss); background:#fbfaf6; }
+  .dropzone:hover, .dropzone.drag{ border-color:var(--moss); background:var(--moss-soft); }
   .dropzone .glyph{
-    width:34px; height:34px; border-radius:50%; border:1px solid var(--line);
-    display:flex; align-items:center; justify-content:center; flex-shrink:0; color:var(--moss); font-size:15px;
+    width:34px; height:34px; border-radius:50%; border:none; background:var(--moss);
+    display:flex; align-items:center; justify-content:center; flex-shrink:0; color:#fff; font-size:15px;
   }
   .dropzone .text{ flex:1; min-width:0; }
   .dropzone .filename{
@@ -1915,14 +2948,16 @@ ${FAVICON}
   .promptline input{ font-size:13.5px; }
   .promptline label{ margin-bottom:6px; }
   .optional{ color:#a39c8c; font-weight:400; text-transform:none; letter-spacing:0; }
+  .stage-head .optional{ color:rgba(255,255,255,0.75); }
 
   button.generate{
-    width:100%; background:var(--ink); color:var(--paper); border:none; padding:15px 20px;
+    width:100%; background:var(--moss); color:#fff; border:none; padding:15px 20px;
+    border-radius:var(--radius-md); box-shadow:var(--shadow-soft);
     font-family:'IBM Plex Mono', monospace; font-size:12.5px; letter-spacing:0.1em; text-transform:uppercase;
     cursor:pointer; display:flex; align-items:center; justify-content:center; gap:10px; transition:background .15s ease;
   }
-  button.generate:hover:not(:disabled){ background:var(--wax); }
-  button.generate:disabled{ background:#cfc7b6; cursor:not-allowed; }
+  button.generate:hover:not(:disabled){ background:#125c34; }
+  button.generate:disabled{ background:#c9d3ce; color:#8a938d; cursor:not-allowed; box-shadow:none; }
   .spinner{
     width:12px; height:12px; border-radius:50%; border:2px solid rgba(247,244,238,0.35);
     border-top-color:var(--paper); animation:spin .7s linear infinite; display:none;
@@ -1936,24 +2971,22 @@ ${FAVICON}
   .status.err{ color:var(--wax); }
   .status.ok{ color:var(--moss); }
 
-  /* ---- the result, styled as a torn take-slip rather than a card ---- */
-  .output{ position:relative; margin-top:22px; background:var(--paper); padding:22px 0 2px; display:none; }
-  .output.show{ display:block; }
-  .output::before{
-    content:""; position:absolute; top:0; left:-20px; right:-20px; height:8px;
-    background-image:radial-gradient(circle at 8px 0, transparent 6.5px, var(--paper) 7px);
-    background-size:16px 8px; background-repeat:repeat-x; background-position:center top;
+  /* ---- the result, styled as a clean rounded card ---- */
+  .output{
+    margin-top:20px; background:var(--moss-soft); border-radius:var(--radius-md);
+    padding:20px; display:none;
   }
+  .output.show{ display:block; }
   .output-head{
     font-family:'IBM Plex Mono', monospace; font-size:11px; letter-spacing:0.08em; text-transform:uppercase;
-    color:#7a756a; margin-bottom:14px; padding-top:8px; border-top:1px dashed var(--line);
+    color:#5f7c6c; margin-bottom:14px;
   }
   .output-head b{ color:var(--ink); font-weight:600; }
   audio{ width:100%; height:42px; }
   .output-foot{ display:flex; justify-content:flex-end; margin-top:16px; }
   .download{
     font-family:'IBM Plex Mono', monospace; font-size:11.5px; letter-spacing:0.06em; text-transform:uppercase;
-    color:var(--ink); text-decoration:none; border:1px solid var(--ink); padding:10px 18px;
+    color:var(--ink); text-decoration:none; border:1px solid var(--ink); border-radius:var(--radius-md); padding:10px 18px;
     display:inline-flex; align-items:center; gap:8px; transition:all .15s ease; flex-shrink:0;
     background:none; cursor:pointer;
   }
@@ -1972,10 +3005,6 @@ ${FAVICON}
     .head-row{ flex-direction:column; align-items:flex-start; gap:14px; }
     .balance{ text-align:left; }
     .stage-inner{ padding:18px; }
-    .stage{ gap:12px; }
-    .spine{ width:24px; }
-    .spine .num{ font-size:18px; }
-    .stage:not(:last-child) .spine::after{ left:9px; }
   }
 </style>
 </head>
@@ -2006,7 +3035,6 @@ ${FAVICON}
   <div class="reel">
 
     <section class="stage">
-      <div class="spine"><span class="num">01</span></div>
       <div class="stage-body">
         <div class="stage-head">
           <h2>Script</h2>
@@ -2021,29 +3049,37 @@ ${FAVICON}
     </section>
 
     <section class="stage">
-      <div class="spine"><span class="num">02</span></div>
       <div class="stage-body">
         <div class="stage-head">
           <h2>Voice</h2>
           <span class="stage-hint optional">optional — add a sample to clone it</span>
         </div>
         <div class="stage-inner">
-          <div class="dropzone" id="dropzone">
-            <div class="glyph">♪</div>
-            <div class="text">
-              <div class="filename" id="fileNameLabel">Choose an audio file, or drop one here</div>
-              <div class="hint">WAV or MP3, a clean few seconds of one speaker works best</div>
-            </div>
-            <button class="clear" id="clearFile" type="button" title="Remove">&times;</button>
-          </div>
-          <input type="file" id="refAudioInput" accept="audio/*">
-
-          <div class="promptline" id="promptLine" style="display:none;">
-            <label for="promptText">What the sample says <span class="optional">(improves cloning)</span></label>
-            <input type="text" id="promptText" placeholder="Transcript of the voice sample…">
-          </div>
-
           <div class="voicetype">
+            <label for="presetVoiceSelect">Preset voice <span class="optional">(admin ကြိုတင် upload ထားသော အသံများ)</span></label>
+            <select id="presetVoiceSelect">
+              <option value="">— Upload your own audio —</option>
+            </select>
+          </div>
+
+          <div id="uploadVoiceWrap" style="margin-top:20px;">
+            <div class="dropzone" id="dropzone">
+              <div class="glyph">♪</div>
+              <div class="text">
+                <div class="filename" id="fileNameLabel">Choose an audio file, or drop one here</div>
+                <div class="hint">WAV or MP3, a clean few seconds of one speaker works best</div>
+              </div>
+              <button class="clear" id="clearFile" type="button" title="Remove">&times;</button>
+            </div>
+            <input type="file" id="refAudioInput" accept="audio/*">
+
+            <div class="promptline" id="promptLine" style="display:none;">
+              <label for="promptText">What the sample says <span class="optional">(improves cloning)</span></label>
+              <input type="text" id="promptText" placeholder="Transcript of the voice sample…">
+            </div>
+          </div>
+
+          <div class="voicetype" id="voiceTypeWrap">
             <label for="voiceTypeSelect">Voice type</label>
             <select id="voiceTypeSelect">
               <option value="female">အမျိုးသမီးအသံ (Female)</option>
@@ -2060,7 +3096,6 @@ ${FAVICON}
     </section>
 
     <section class="stage">
-      <div class="spine"><span class="num">03</span></div>
       <div class="stage-body">
         <div class="stage-head">
           <h2>Render</h2>
@@ -2124,17 +3159,52 @@ ${FAVICON}
   const sendTelegramBtn = $('sendTelegramBtn');
 
   const voiceTypeSelect = $('voiceTypeSelect');
+  const voiceTypeWrap = $('voiceTypeWrap');
   const multiVoiceHint = $('multiVoiceHint');
+  const presetVoiceSelect = $('presetVoiceSelect');
+  const uploadVoiceWrap = $('uploadVoiceWrap');
 
   voiceTypeSelect.addEventListener('change', () => {
     multiVoiceHint.style.display = voiceTypeSelect.value === 'multi' ? 'block' : 'none';
   });
+
+  // Voice Type ဟာ reference audio မပါတဲ့အခါမှသာ အလုပ်လုပ်သည် (admin preset ရွေးထားရင်
+  // ဖြစ်စေ၊ own audio upload လုပ်ထားရင်ဖြစ်စေ voice_type ကို backend က လျစ်လျူရှုမည်ဖြစ်၍) —
+  // ဒါကြောင့် "Upload your own audio" ရွေးထားပြီး audio မတင်ရသေးတဲ့အချိန်မှသာ ပြပေးမည်
+  function updateVoiceTypeVisibility(){
+    const hasPreset = !!presetVoiceSelect.value;
+    const hasUpload = !!refAudioBase64;
+    voiceTypeWrap.style.display = (hasPreset || hasUpload) ? 'none' : '';
+  }
+
+  presetVoiceSelect.addEventListener('change', () => {
+    uploadVoiceWrap.style.display = presetVoiceSelect.value ? 'none' : '';
+    updateVoiceTypeVisibility();
+  });
+
+  async function loadVoicePresets(){
+    try {
+      const res = await fetch('/api/voice-presets/list', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const data = await res.json();
+      if (data.success && data.presets && data.presets.length) {
+        data.presets.forEach(p => {
+          const opt = document.createElement('option');
+          opt.value = p.id;
+          opt.textContent = p.name;
+          presetVoiceSelect.appendChild(opt);
+        });
+      }
+    } catch (e) { /* preset list ကို load မရရင် upload-your-own အတိုင်းပဲ ဆက်အလုပ်လုပ်ပါမည် */ }
+  }
+  loadVoicePresets();
 
   let refAudioBase64 = null;
   let currentCredits = 0;
   let polling = false;
   let lastAudioBase64 = null;
   let lastAudioFormat = null;
+
+  updateVoiceTypeVisibility();
 
   if (!tgUser || !tgUser.id) {
     statusLine.textContent = 'Telegram App ကနေ ပြန်ဝင်ပေးပါ။';
@@ -2182,6 +3252,7 @@ ${FAVICON}
       fileNameLabel.textContent = file.name;
       dropzone.classList.add('has-file');
       promptLine.style.display = 'block';
+      updateVoiceTypeVisibility();
     };
     reader.onerror = () => setStatus('Could not read that file.', 'err');
     reader.readAsDataURL(file);
@@ -2206,6 +3277,7 @@ ${FAVICON}
     dropzone.classList.remove('has-file');
     promptLine.style.display = 'none';
     promptTextEl.value = '';
+    updateVoiceTypeVisibility();
   });
 
   function setStatus(msg, kind){
@@ -2239,9 +3311,10 @@ ${FAVICON}
         body: JSON.stringify({
           userId: tgUser.id,
           text,
-          refAudioBase64: refAudioBase64 || undefined,
+          refAudioBase64: presetVoiceSelect.value ? undefined : (refAudioBase64 || undefined),
           promptText: promptTextEl.value.trim() || undefined,
-          voiceType: voiceTypeSelect.value
+          voiceType: voiceTypeSelect.value,
+          voicePresetId: presetVoiceSelect.value || undefined
         })
       });
       const startData = await startRes.json();
@@ -2249,8 +3322,8 @@ ${FAVICON}
         throw new Error(startData.error || 'Request failed');
       }
 
-      currentCredits = startData.remainingCredits;
-      creditsNumEl.textContent = currentCredits;
+      // မှတ်ချက်: Credits ကို job အောင်မြင်စွာ ပြီးမြောက်မှသာ နုတ်မည်ဖြစ်၍
+      // ဒီနေရာမှာ balance ကို ကြိုတင်မလျှော့ချပါ — pollForResult ပြီးမှ loadCredits() ဖြင့် sync လုပ်ပါမည်
 
       polling = true;
       await pollForResult(startData.jobId, startData.cost);
@@ -2288,14 +3361,13 @@ ${FAVICON}
         if (out.error) throw new Error(out.error);
         if (!out.audio_base64) throw new Error('Finished but returned no audio.');
         await renderAudio(out);
+        await loadCredits();
         setStatus('Done.', 'ok');
         return;
       } else if (data.status === 'FAILED') {
-        await loadCredits();
-        throw new Error(data.error || 'The worker reported a failure. Credits refunded.');
+        throw new Error(data.error || 'The worker reported a failure. No credits were charged.');
       } else if (data.status === 'CANCELLED') {
-        await loadCredits();
-        throw new Error('Job was cancelled. Credits refunded.');
+        throw new Error('Job was cancelled. No credits were charged.');
       }
 
       await new Promise(r => setTimeout(r, 2000));
@@ -2629,6 +3701,23 @@ function getProfileHtml() {
     }
     .warn { font-size: 11.5px; color: #b5482f; margin-top: 6px; }
     .empty { text-align: center; color: #999; padding: 30px 10px; }
+    .req-list { display: flex; flex-direction: column; gap: 8px; }
+    .req-item {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      background: #f7f6f0; border-radius: 6px; padding: 10px 12px;
+    }
+    .req-item .req-main { min-width: 0; }
+    .req-item .req-text { font-size: 12.5px; color: #333; }
+    .req-item .req-meta { font-size: 11px; color: #999; margin-top: 2px; }
+    .req-badge {
+      flex-shrink: 0; font-size: 10px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase;
+      padding: 3px 9px; border-radius: 10px; white-space: nowrap;
+    }
+    .req-badge.completed { background: #eaf7ee; color: #1a7a44; }
+    .req-badge.failed { background: #fdeceb; color: #c0392b; }
+    .req-badge.cancelled { background: #f0f0ee; color: #888; }
+    .req-badge.pending { background: #fff6e0; color: #a17a1c; }
+    .req-err { font-size: 11px; color: #c0392b; margin-top: 3px; }
   </style>
 </head>
 <body>
@@ -2707,9 +3796,16 @@ function getProfileHtml() {
           <div class="msg" id="apiKeyMsg"></div>
           <div style="margin-top:12px;"><a href="/api-docs" class="back">📄 View API Documentation →</a></div>
         </div>
+
+        <div class="card">
+          <h3>Request History</h3>
+          <p style="font-size:12.5px; color:#666; margin-top:0;">Voice generate request တစ်ခုချင်းစီရဲ့ status (Completed/Failed/Cancelled) နဲ့ ဘယ်လောက် credits သုံးခဲ့လဲ ဒီနေရာမှာ ကြည့်နိုင်ပါသည်။</p>
+          <div id="requestsBox"><div class="empty">Loading…</div></div>
+        </div>
       \`;
 
       renderApiKeyButtons();
+      loadRequests();
     }
 
     function renderApiKeyButtons() {
@@ -2729,15 +3825,79 @@ function getProfileHtml() {
     function u_referralCode() { return (profileData && profileData.referralCode) || ''; }
     function u_referralLink() { return (profileData && profileData.referralLink) || ''; }
 
+    function statusBadge(status) {
+      const map = {
+        COMPLETED: ['completed', 'Completed'],
+        FAILED: ['failed', 'Failed'],
+        CANCELLED: ['cancelled', 'Cancelled'],
+        IN_PROGRESS: ['pending', 'In Progress'],
+        IN_QUEUE: ['pending', 'Queued'],
+      };
+      const [cls, label] = map[status] || ['pending', status || 'Unknown'];
+      return '<span class="req-badge ' + cls + '">' + label + '</span>';
+    }
+
+    async function loadRequests() {
+      const box = document.getElementById('requestsBox');
+      try {
+        const res = await fetch('/api/profile/requests', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ userId: tgUser.id })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          box.innerHTML = '<div class="empty">' + (data.error || 'Failed to load requests') + '</div>';
+          return;
+        }
+        if (!data.requests.length) {
+          box.innerHTML = '<div class="empty">Request မရှိသေးပါ</div>';
+          return;
+        }
+        box.innerHTML = '<div class="req-list">' + data.requests.map(r => \`
+          <div class="req-item">
+            <div class="req-main">
+              <div class="req-text">\${r.text_length} characters\${r.credits_charged ? ' · ' + r.credits_charged + ' credits သုံးပြီး' : ''}</div>
+              <div class="req-meta">\${r.source === 'api' ? 'Public API' : 'Voice Studio'} · \${new Date(r.created_at + 'Z').toLocaleString()}</div>
+              \${r.error_message ? '<div class="req-err">' + r.error_message + '</div>' : ''}
+            </div>
+            \${statusBadge(r.status)}
+          </div>
+        \`).join('') + '</div>';
+      } catch (err) {
+        box.innerHTML = '<div class="empty">Network error</div>';
+      }
+    }
+
     function copyText(text) {
       if (!text) return;
-      navigator.clipboard.writeText(text).then(() => {
+      const announce = () => {
         if (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.showAlert) {
           window.Telegram.WebApp.showAlert('Copied!');
         } else {
           alert('Copied!');
         }
-      });
+      };
+      const fallback = () => {
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+          announce();
+        } catch (e) {
+          alert('Copy မရပါ — ကိုယ်တိုင် ရွေးပြီး ကူးယူပေးပါ။');
+        }
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(announce).catch(fallback);
+      } else {
+        fallback();
+      }
     }
 
     let lastGeneratedApiKey = null;
@@ -2856,7 +4016,7 @@ function getApiDocsHtml() {
   <p>Request body ထဲမှာ <code>apiKey</code> field ပါ ထည့်ပေးပါ။ Key ကို Profile page → API Key → Generate ကနေ ရယူနိုင်ပါတယ်။ Key ကို ဒီတစ်ကြိမ်တည်းသာ ပြသမည်ဖြစ်၍ လုံခြုံစွာ သိမ်းထားပါ။</p>
 
   <h2>Credits</h2>
-  <p>Voice တစ်ခါ Generate လုပ်တိုင်း <code>text</code> ရဲ့ character အရေအတွက်အတိုင်း credits နုတ်ယူပါသည်။ Credits မလုံလောက်ရင် <code>402</code> error ပြန်ပေးပါမည်။ Job fail/cancel ဖြစ်ရင် နုတ်ထားတဲ့ credits ကို auto ပြန်ထည့်ပေးပါသည်။</p>
+  <p>Voice တစ်ခါ Generate လုပ်တိုင်း <code>text</code> ရဲ့ character အရေအတွက်အတိုင်း credits လိုအပ်ပါသည် (လက်ကျန် စစ်ဆေးမှု ချက်ချင်းလုပ်ပါမည်)။ Credits မလုံလောက်ရင် <code>402</code> error ပြန်ပေးပါမည်။ <strong>Job အောင်မြင်စွာ ပြီးမြောက် (COMPLETED) မှသာ</strong> credits ကို အမှန်တကယ် နုတ်ယူပါသည် — Job fail/cancel ဖြစ်ရင် credits ဘာမှ မနုတ်ပါ။</p>
 
   <h2>1. Generate Voice</h2>
   <span class="badge">POST</span><code>/api/v1/generate</code>
@@ -2867,7 +4027,8 @@ function getApiDocsHtml() {
   "text": "မင်္ဂလာပါ",
   "refAudioBase64": "",        // Optional - voice cloning
   "promptText": "",            // Optional - reference audio ရဲ့ transcript
-  "voiceType": ""              // Optional - "female" | "male"
+  "voiceType": "",             // Optional - "female" | "male"
+  "voicePresetId": ""          // Optional - Admin ကြိုတင်တင်ထားတဲ့ Voice preset ID (refAudioBase64 ထက် priority ရှိသည်)
 }</pre>
 
   <table>
@@ -2877,6 +4038,7 @@ function getApiDocsHtml() {
     <tr><td>refAudioBase64</td><td>string</td><td>No</td><td>Voice cloning အတွက် reference audio (base64 WAV)</td></tr>
     <tr><td>promptText</td><td>string</td><td>No</td><td>reference audio ထဲက စာသား (cloning quality တိုးစေသည်)</td></tr>
     <tr><td>voiceType</td><td>string</td><td>No</td><td>"female" or "male" (reference audio မပါရင်သာ အလုပ်လုပ်သည်)</td></tr>
+    <tr><td>voicePresetId</td><td>number</td><td>No</td><td>Admin ကြိုတင် upload ထားတဲ့ voice preset ID — ဒါပါလာရင် refAudioBase64 အစား ဒီ preset ရဲ့ အသံကို သုံးပါမည်</td></tr>
   </table>
 
   <h3>Response (200)</h3>
@@ -2884,8 +4046,9 @@ function getApiDocsHtml() {
   "success": true,
   "jobId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
   "cost": 9,
-  "remainingCredits": 4991
+  "remainingCredits": 5000
 }</pre>
+  <p style="font-size:12px; color:#888;">(<code>remainingCredits</code> ဟာ ဒီအချိန်အထိ လက်ကျန် balance ဖြစ်ပြီး — <code>cost</code> ကို job ပြီးမြောက်မှသာ နုတ်ပါမည်)</p>
 
   <h3>Error Responses</h3>
   <table>
@@ -2907,7 +4070,7 @@ function getApiDocsHtml() {
   "jobId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
   "cost": 9
 }</pre>
-  <p style="font-size:12px; color:#888;">(<code>cost</code> ကို ပါထည့်ပေးပါက Job fail ဖြစ်သွားရင် credits auto refund လုပ်ပေးပါမည်)</p>
+  <p style="font-size:12px; color:#888;">(<code>cost</code> ကို ပါထည့်ပေးပါ — status <code>COMPLETED</code> ဖြစ်မှသာ ဒီ credits ကို နုတ်ယူပါမည်။ fail/cancel ဖြစ်ရင် ဘာမှ မနုတ်ပါ)</p>
 
   <h3>Response — Processing</h3>
   <pre>{ "id": "...", "status": "IN_PROGRESS" }</pre>
