@@ -2948,6 +2948,7 @@ function getStudioHtml() {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Ko Paing 🎙️ AI Voice Studio</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
 ${FAVICON}
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;1,9..144,500&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap');
@@ -3284,6 +3285,7 @@ ${FAVICON}
   const $ = id => document.getElementById(id);
 
   const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+  if (tg) { try { tg.ready(); } catch(e){} }
   let tgUser = null;
   try { tgUser = JSON.parse(sessionStorage.getItem('tg_user') || 'null'); } catch(e){}
   // Server ဘက်က request တိုင်းကို Telegram initData signature နဲ့ အသစ်ပြန် verify လုပ်ပါသည်
@@ -3587,6 +3589,7 @@ function getPlansHtml() {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Plans · Ko Paing AI Voice Studio</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
   ${FAVICON}
   <style>
     body {
@@ -3680,6 +3683,7 @@ function getPlansHtml() {
 
   <script>
     const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+    if (tg) { try { tg.ready(); } catch(e){} }
     let tgUser = null;
     try { tgUser = JSON.parse(sessionStorage.getItem('tg_user') || 'null'); } catch(e){}
     function currentInitData() { return tg && tg.initData ? tg.initData : null; }
@@ -3813,6 +3817,7 @@ function getProfileHtml() {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Profile · Ko Paing AI Voice Studio</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
   ${FAVICON}
   <style>
     body {
@@ -3889,6 +3894,7 @@ function getProfileHtml() {
 
   <script>
     const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+    if (tg) { try { tg.ready(); } catch(e){} }
     let tgUser = null;
     try { tgUser = JSON.parse(sessionStorage.getItem('tg_user') || 'null'); } catch(e){}
     function currentInitData() { return tg && tg.initData ? tg.initData : null; }
