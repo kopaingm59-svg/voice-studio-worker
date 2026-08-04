@@ -294,8 +294,41 @@ async function setSetting(env, key, value) {
     .run();
 }
 
-function requireAdmin(env, token) {
-  return !!token && token === env.SESSION_SECRET;
+// ---- Admin session tokens ---------------------------------------------------
+// SESSION_SECRET ကို client ဆီ တိုက်ရိုက် မပေးတော့ပါ (ပေးလိုက်ရင် ထာဝရ skeleton-key
+// တစ်ခု ဖြစ်သွားမှာမို့ပါ)။ အစား သက်တမ်း (expiry) ပါတဲ့ signed token ကို ထုတ်ပေးပြီး
+// login တိုင်း အသစ်ပြန်ရမည်၊ သက်တမ်းကုန်ရင် ပြန် login ဝင်ရမည်ဖြစ်သည်။
+const ADMIN_TOKEN_TTL_SECONDS = 12 * 60 * 60; // 12 hours
+
+async function hmacHex(secret, message) {
+  const enc = new TextEncoder();
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const sig = await crypto.subtle.sign('HMAC', cryptoKey, enc.encode(message));
+  return Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function createAdminToken(env) {
+  const expires = Math.floor(Date.now() / 1000) + ADMIN_TOKEN_TTL_SECONDS;
+  const payload = `admin.${expires}`;
+  const sig = await hmacHex(env.SESSION_SECRET, payload);
+  return `${payload}.${sig}`;
+}
+
+async function requireAdmin(env, token) {
+  if (!token || typeof token !== 'string') return false;
+  const parts = token.split('.');
+  if (parts.length !== 3 || parts[0] !== 'admin') return false;
+  const [tag, expiresStr, sig] = parts;
+  const expires = parseInt(expiresStr, 10);
+  if (!expires || Math.floor(Date.now() / 1000) > expires) return false;
+  const expectedSig = await hmacHex(env.SESSION_SECRET, `${tag}.${expiresStr}`);
+  return constantTimeEqual(expectedSig, sig);
 }
 
 // ---- Request logs: tracks each generate call so users/admins can see
@@ -370,7 +403,7 @@ async function handleTelegramAuth(request, env, corsHeaders) {
     return json({ error: 'Missing initData' }, 400, corsHeaders);
   }
 
-  const isValid = await verifyTelegramAuth(initData, env.TELEGRAM_BOT_TOKEN);
+  const isValid = await verifyTelegramAuth(initData, env.TELEGRAM_BOT_TOKEN, 86400);
   if (!isValid) {
     return json({ error: 'Invalid Telegram authentication' }, 401, corsHeaders);
   }
@@ -454,7 +487,7 @@ async function handleTelegramAuth(request, env, corsHeaders) {
   }
 
   return json(
-    { success: true, user: { ...user, isAdmin }, token: isAdmin ? env.SESSION_SECRET : null },
+    { success: true, user: { ...user, isAdmin }, token: isAdmin ? await createAdminToken(env) : null },
     200,
     corsHeaders
   );
@@ -464,41 +497,53 @@ async function handleAdminAuth(request, env, corsHeaders) {
   const body = await request.json();
   const { password } = body;
 
-  if (!password || password !== env.ADMIN_SECRET) {
+  if (!password || !constantTimeEqual(String(password), String(env.ADMIN_SECRET || ''))) {
     return json({ error: 'Invalid Password' }, 401, corsHeaders);
   }
 
-  return json({ success: true, token: env.SESSION_SECRET }, 200, corsHeaders);
+  return json({ success: true, token: await createAdminToken(env) }, 200, corsHeaders);
 }
 
+// SECURITY NOTE: ဒီ endpoint ကို frontend ဘယ်နေရာကမှ မခေါ်တော့ပါ။ ယခင်က auth
+// စစ်ဆေးမှု လုံးဝမရှိဘဲ client က ပို့လိုက်တဲ့ userId + credits ကို တိုက်ရိုက် DB ထဲ
+// ရေးခွင့်ပေးခဲ့တာ hacker တစ်ယောက်က ကိုယ့် credits ကို ကန့်သတ်မရှိ တိုးနိုင်တဲ့
+// အလွန်အန္တရာယ်ကြီးတဲ့ ပေါက်ကြားမှုတစ်ခု ဖြစ်ခဲ့ပါတယ်။ Telegram initData verify
+// လုပ်ပြီး ကိုယ်ပိုင် account ရဲ့ "name" ကိုသာ update ခွင့်ပြု၍ credits ကို client
+// ဘက်ကနေ ဘယ်လိုနည်းနဲ့မှ မပြောင်းလဲနိုင်တော့အောင် ပြင်ဆင်ထားပါသည်.
 async function handleUserSync(request, env, corsHeaders) {
-  const body = await request.json();
-  const { userId, userData } = body;
+  const body = await request.json().catch(() => ({}));
+  const { initData, userData } = body;
 
-  if (!userId) {
-    return json({ error: 'Missing userId' }, 400, corsHeaders);
+  const verifiedUserId = await getVerifiedTelegramUserId(initData, env);
+  if (!verifiedUserId) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
-  await upsertUser(env, userId, {
+  // credits ကို ဒီနေရာကနေ ဘယ်တော့မှ လက်ခံမည်မဟုတ်ပါ — credits ပြောင်းလဲမှုအားလုံးကို
+  // server-side logic (signup bonus, referral bonus, generate ကုန်ကျစရိတ်, admin adjust)
+  // ကနေသာ ချုပ်ကိုင်ပါသည်။
+  await upsertUser(env, verifiedUserId, {
     name: userData?.name,
-    credits: userData?.credits,
   });
 
   return json({ success: true }, 200, corsHeaders);
 }
 
 async function handleUserGet(request, env, corsHeaders) {
-  const body = await request.json();
-  const { userId } = body;
+  const body = await request.json().catch(() => ({}));
+  const { initData } = body;
 
-  if (!userId) {
-    return json({ error: 'Missing userId' }, 400, corsHeaders);
+  const verifiedUserId = await getVerifiedTelegramUserId(initData, env);
+  if (!verifiedUserId) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
+  // client က ပို့လိုက်တဲ့ userId ကို လုံးဝ မယုံပါ — initData ထဲက verify ပြီးသား id ကိုသာ
+  // သုံးပြီး ကိုယ်ပိုင် account ဒေတာကိုသာ ပြန်ပေးပါသည် (တခြားသူ့ account ကို ကြည့်လို့မရအောင်)
   const row = await env.DB.prepare(
     'SELECT id, name, username, credits, is_admin FROM users WHERE id = ?1'
   )
-    .bind(String(userId))
+    .bind(verifiedUserId)
     .first();
 
   return json({ success: true, user: row || null }, 200, corsHeaders);
@@ -508,7 +553,7 @@ async function handleAdminListUsers(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
   const token = body.token || (request.headers.get('Authorization') || '').replace('Bearer ', '');
 
-  if (!token || token !== env.SESSION_SECRET) {
+  if (!(await requireAdmin(env, token))) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
@@ -525,7 +570,7 @@ async function handleAdminBanUser(request, env, corsHeaders) {
   const body = await request.json();
   const { token, userId, banned } = body;
 
-  if (!requireAdmin(env, token)) {
+  if (!(await requireAdmin(env, token))) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
   if (!userId) {
@@ -547,7 +592,7 @@ async function handleAdminAdjustCredits(request, env, corsHeaders) {
   const body = await request.json();
   const { token, userId, amount } = body;
 
-  if (!requireAdmin(env, token)) {
+  if (!(await requireAdmin(env, token))) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
   if (!userId) {
@@ -581,7 +626,7 @@ async function handleAdminRequestsList(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
   const { token, userId } = body;
 
-  if (!requireAdmin(env, token)) {
+  if (!(await requireAdmin(env, token))) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
@@ -613,7 +658,7 @@ async function handleAdminRequestsList(request, env, corsHeaders) {
 
 async function handleAdminVoicePresetsList(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
-  if (!requireAdmin(env, body.token)) {
+  if (!(await requireAdmin(env, body.token))) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
   try {
@@ -629,7 +674,7 @@ async function handleAdminVoicePresetsList(request, env, corsHeaders) {
 async function handleAdminVoicePresetGet(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
   const { token, id } = body;
-  if (!requireAdmin(env, token)) {
+  if (!(await requireAdmin(env, token))) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
   if (!id) {
@@ -647,7 +692,7 @@ async function handleAdminVoicePresetGet(request, env, corsHeaders) {
 async function handleAdminVoicePresetCreate(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
   const { token, name, audioBase64, promptText } = body;
-  if (!requireAdmin(env, token)) {
+  if (!(await requireAdmin(env, token))) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
   if (!name || !name.trim()) {
@@ -686,7 +731,7 @@ async function handleAdminVoicePresetCreate(request, env, corsHeaders) {
 async function handleAdminVoicePresetDelete(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
   const { token, id } = body;
-  if (!requireAdmin(env, token)) {
+  if (!(await requireAdmin(env, token))) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
   if (!id) {
@@ -735,7 +780,7 @@ async function handlePaymentMethodsList(request, env, corsHeaders) {
 
 async function handleAdminPlansList(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
-  if (!requireAdmin(env, body.token)) {
+  if (!(await requireAdmin(env, body.token))) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
@@ -745,7 +790,7 @@ async function handleAdminPlansList(request, env, corsHeaders) {
 
 async function handleAdminPlanCreate(request, env, corsHeaders) {
   const body = await request.json();
-  if (!requireAdmin(env, body.token)) {
+  if (!(await requireAdmin(env, body.token))) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
@@ -766,7 +811,7 @@ async function handleAdminPlanCreate(request, env, corsHeaders) {
 
 async function handleAdminPlanUpdate(request, env, corsHeaders) {
   const body = await request.json();
-  if (!requireAdmin(env, body.token)) {
+  if (!(await requireAdmin(env, body.token))) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
@@ -804,7 +849,7 @@ async function handleAdminPlanUpdate(request, env, corsHeaders) {
 
 async function handleAdminPlanDelete(request, env, corsHeaders) {
   const body = await request.json();
-  if (!requireAdmin(env, body.token)) {
+  if (!(await requireAdmin(env, body.token))) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
@@ -821,7 +866,7 @@ async function handleAdminPlanDelete(request, env, corsHeaders) {
 
 async function handleAdminSettingsGet(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
-  if (!requireAdmin(env, body.token)) {
+  if (!(await requireAdmin(env, body.token))) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
@@ -842,7 +887,7 @@ async function handleAdminSettingsGet(request, env, corsHeaders) {
 
 async function handleAdminSettingsUpdate(request, env, corsHeaders) {
   const body = await request.json();
-  if (!requireAdmin(env, body.token)) {
+  if (!(await requireAdmin(env, body.token))) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
@@ -863,7 +908,7 @@ async function handleAdminSettingsUpdate(request, env, corsHeaders) {
 
 async function handleAdminPaymentMethodsList(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
-  if (!requireAdmin(env, body.token)) {
+  if (!(await requireAdmin(env, body.token))) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
@@ -873,7 +918,7 @@ async function handleAdminPaymentMethodsList(request, env, corsHeaders) {
 
 async function handleAdminPaymentMethodCreate(request, env, corsHeaders) {
   const body = await request.json();
-  if (!requireAdmin(env, body.token)) {
+  if (!(await requireAdmin(env, body.token))) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
@@ -895,7 +940,7 @@ async function handleAdminPaymentMethodCreate(request, env, corsHeaders) {
 
 async function handleAdminPaymentMethodUpdate(request, env, corsHeaders) {
   const body = await request.json();
-  if (!requireAdmin(env, body.token)) {
+  if (!(await requireAdmin(env, body.token))) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
@@ -931,7 +976,7 @@ async function handleAdminPaymentMethodUpdate(request, env, corsHeaders) {
 
 async function handleAdminPaymentMethodDelete(request, env, corsHeaders) {
   const body = await request.json();
-  if (!requireAdmin(env, body.token)) {
+  if (!(await requireAdmin(env, body.token))) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
@@ -947,11 +992,20 @@ async function handleAdminPaymentMethodDelete(request, env, corsHeaders) {
 // ---- Purchases: Submit (User) + Approve/Reject (Admin) ----------------
 
 async function handlePurchaseSubmit(request, env, corsHeaders) {
-  const body = await request.json();
-  const { userId, planId, slipImageBase64 } = body;
+  const body = await request.json().catch(() => ({}));
+  const { initData, planId, slipImageBase64 } = body;
 
-  if (!userId || !planId || !slipImageBase64) {
-    return json({ error: 'userId, planId, slip image လိုအပ်ပါသည်' }, 400, corsHeaders);
+  // login ဝင်ထားသူ ကိုယ်တိုင်ရဲ့ account အတွက်သာ purchase တင်ခွင့်ပြုပါသည် — client ပို့လိုက်တဲ့
+  // userId ကို မယုံပါက တခြားသူ့ account နာမည်ဖြင့် fake purchase spam တင်ခြင်းကို ကာကွယ်နိုင်ပါသည်
+  const userId = await getVerifiedTelegramUserId(initData, env);
+  if (!userId) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  if (!planId || !slipImageBase64) {
+    return json({ error: 'planId, slip image လိုအပ်ပါသည်' }, 400, corsHeaders);
+  }
+  if (slipImageBase64.length > 10 * 1024 * 1024) {
+    return json({ error: 'Slip image သိပ်ကြီးလွန်းပါသည်' }, 413, corsHeaders);
   }
 
   const plan = await env.DB.prepare('SELECT * FROM plans WHERE id = ?1 AND is_active = 1')
@@ -991,7 +1045,7 @@ async function handlePurchaseSubmit(request, env, corsHeaders) {
 
 async function handleAdminPurchasesList(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
-  if (!requireAdmin(env, body.token)) {
+  if (!(await requireAdmin(env, body.token))) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
@@ -1007,7 +1061,7 @@ async function handleAdminPurchasesList(request, env, corsHeaders) {
 
 async function handleAdminPurchaseReview(request, env, corsHeaders) {
   const body = await request.json();
-  if (!requireAdmin(env, body.token)) {
+  if (!(await requireAdmin(env, body.token))) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
@@ -1053,7 +1107,7 @@ async function handleAdminPurchaseReview(request, env, corsHeaders) {
 async function handleAdminNotifyUser(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
   const { token, userId, message } = body;
-  if (!requireAdmin(env, token)) {
+  if (!(await requireAdmin(env, token))) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
   if (!userId || !String(userId).trim()) {
@@ -1075,7 +1129,7 @@ async function handleAdminNotifyUser(request, env, corsHeaders) {
 async function handleAdminBroadcast(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
   const { token, title, message, imageBase64 } = body;
-  if (!requireAdmin(env, token)) {
+  if (!(await requireAdmin(env, token))) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
   if (!message || !message.trim()) {
@@ -1346,10 +1400,17 @@ function mergeWavChunksBase64(audioBase64Chunks) {
 
 async function handleGenerateStart(request, env, corsHeaders) {
   const body = await request.json();
-  const { userId, text, refAudioBase64, promptText, voiceType, voicePresetId } = body;
+  const { initData, text, refAudioBase64, promptText, voiceType, voicePresetId } = body;
 
+  // client ပို့လိုက်တဲ့ userId ကို လုံးဝ မယုံပါ — Telegram initData signature ကို verify
+  // လုပ်ပြီး ဒီ request ကို ပို့သူ ဟုတ်/မဟုတ် သေချာအောင် စစ်ဆေးပါသည်
+  const userId = await getVerifiedTelegramUserId(initData, env);
   if (!userId) {
-    return json({ error: 'Missing userId' }, 400, corsHeaders);
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  const userStatus = await env.DB.prepare('SELECT is_banned FROM users WHERE id = ?1').bind(userId).first();
+  if (userStatus && userStatus.is_banned) {
+    return json({ error: 'သင့်အကောင့်ကို ပိတ်ထားပါသည်။ Admin ကို ဆက်သွယ်ပါ။' }, 403, corsHeaders);
   }
   if (!text || !text.trim()) {
     return json({ error: 'Text to speak လိုအပ်ပါသည်' }, 400, corsHeaders);
@@ -1361,7 +1422,7 @@ async function handleGenerateStart(request, env, corsHeaders) {
   const cost = text.trim().length;
 
   const userRow = await env.DB.prepare('SELECT credits FROM users WHERE id = ?1')
-    .bind(String(userId))
+    .bind(userId)
     .first();
   const currentCredits = userRow ? Number(userRow.credits || 0) : 0;
 
@@ -1433,9 +1494,13 @@ async function handleGenerateStart(request, env, corsHeaders) {
 }
 
 async function handleGenerateStatus(request, env, corsHeaders) {
-  const body = await request.json();
-  const { userId, jobId, cost } = body;
+  const body = await request.json().catch(() => ({}));
+  const { initData, jobId } = body;
 
+  const userId = await getVerifiedTelegramUserId(initData, env);
+  if (!userId) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
   if (!jobId) {
     return json({ error: 'Missing jobId' }, 400, corsHeaders);
   }
@@ -1443,16 +1508,31 @@ async function handleGenerateStatus(request, env, corsHeaders) {
     return json({ error: 'RunPod environment variables missing' }, 500, corsHeaders);
   }
 
+  // ဒီ job ဟုတ်တာမှန်ကန်ကြောင်း + login ဝင်ထားတဲ့ user ကိုယ်တိုင်ရဲ့ job ဟုတ်ကြောင်း
+  // request_logs ထဲက အထောက်အထားနဲ့ တိုက်စစ်ပါသည် — client ဘက်က ပို့လိုက်တဲ့ userId/cost
+  // ကို လုံးဝ မယုံတော့ပါ (မဟုတ်ရင် တခြားသူ့ job ကို ခိုးကြည့်တာ၊ cost ကို လိမ်ညာတာ စတာတွေ ဖြစ်နိုင်ပါတယ်)
+  const logRow = await env.DB.prepare(
+    'SELECT user_id, text_length, status FROM request_logs WHERE job_id = ?1'
+  )
+    .bind(String(jobId))
+    .first();
+  if (!logRow || String(logRow.user_id) !== userId) {
+    return json({ error: 'Job not found' }, 404, corsHeaders);
+  }
+  const cost = Number(logRow.text_length) || 0;
+
   const data = jobId.startsWith(MULTI_JOB_PREFIX)
     ? await fetchMultiJobStatus(jobId.slice(MULTI_JOB_PREFIX.length).split(','), env)
     : await fetchSingleJobStatus(jobId, env);
 
   // Job အောင်မြင်စွာ ပြီးမြောက် (audio ထွက်) မှသာ credits ကို နုတ်ပါမည်
-  if (data.status === 'COMPLETED' && userId && cost) {
+  // — logRow.status ကို စစ်ခြင်းဖြင့် frontend က status ကို ထပ်ခါထပ်ခါ poll လုပ်လည်း
+  // credits ကို တစ်ကြိမ်ထက်ပို၍ ထပ်နုတ် (double-charge) မဖြစ်စေရန် ကာကွယ်ပါသည်
+  if (data.status === 'COMPLETED' && cost && logRow.status !== 'COMPLETED') {
     await env.DB.prepare(
       `UPDATE users SET credits = COALESCE(credits, 0) - ?1, updated_at = datetime('now') WHERE id = ?2`
     )
-      .bind(Number(cost), String(userId))
+      .bind(cost, userId)
       .run();
     await logRequestUpdate(env, jobId, { status: 'COMPLETED', creditsCharged: cost, errorMessage: null });
   } else if (data.status === 'FAILED') {
@@ -1523,10 +1603,11 @@ async function fetchMultiJobStatus(jobIds, env) {
 
 async function handleProfileGet(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
-  const { userId } = body;
+  const { initData } = body;
 
+  const userId = await getVerifiedTelegramUserId(initData, env);
   if (!userId) {
-    return json({ error: 'Missing userId' }, 400, corsHeaders);
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
   const user = await env.DB.prepare(
@@ -1585,10 +1666,11 @@ async function handleProfileGet(request, env, corsHeaders) {
 
 async function handleProfileRequestsList(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
-  const { userId } = body;
+  const { initData } = body;
 
+  const userId = await getVerifiedTelegramUserId(initData, env);
   if (!userId) {
-    return json({ error: 'Missing userId' }, 400, corsHeaders);
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
   try {
@@ -1608,10 +1690,11 @@ async function handleProfileRequestsList(request, env, corsHeaders) {
 
 async function handleApiKeyGenerate(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
-  const { userId } = body;
+  const { initData } = body;
 
+  const userId = await getVerifiedTelegramUserId(initData, env);
   if (!userId) {
-    return json({ error: 'Missing userId' }, 400, corsHeaders);
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
   const user = await env.DB.prepare('SELECT id FROM users WHERE id = ?1').bind(String(userId)).first();
@@ -1635,10 +1718,11 @@ async function handleApiKeyGenerate(request, env, corsHeaders) {
 
 async function handleApiKeyRevoke(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
-  const { userId } = body;
+  const { initData } = body;
 
+  const userId = await getVerifiedTelegramUserId(initData, env);
   if (!userId) {
-    return json({ error: 'Missing userId' }, 400, corsHeaders);
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
   await env.DB.prepare(
@@ -1738,7 +1822,7 @@ async function handleApiV1Generate(request, env, corsHeaders) {
 
 async function handleApiV1GenerateStatus(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
-  const { apiKey, jobId, cost } = body;
+  const { apiKey, jobId } = body;
 
   if (!apiKey) {
     return json({ error: 'Missing apiKey' }, 401, corsHeaders);
@@ -1756,17 +1840,31 @@ async function handleApiV1GenerateStatus(request, env, corsHeaders) {
     return json({ error: 'Invalid API key' }, 401, corsHeaders);
   }
 
+  // ဒီ jobId ဟာ ဒီ apiKey ပိုင်ရှင်ရဲ့ job အမှန်ဟုတ်ကြောင်း + cost ကို client ကနေ မယုံဘဲ
+  // request_logs ထဲက authoritative value ကို သုံးပြီး စစ်ဆေးပါသည် — မဟုတ်ရင် တခြားသူ့ job ID ကို
+  // ခန့်မှန်း/သိရင် အသံ output ကို ခိုးကြည့်ခြင်း၊ cost ကို လိမ်ညာနုတ်ခြင်း တို့ကို ကာကွယ်ရန်
+  const logRow = await env.DB.prepare(
+    'SELECT user_id, text_length, status FROM request_logs WHERE job_id = ?1'
+  )
+    .bind(String(jobId))
+    .first();
+  if (!logRow || String(logRow.user_id) !== String(user.id)) {
+    return json({ error: 'Job not found' }, 404, corsHeaders);
+  }
+  const cost = Number(logRow.text_length) || 0;
+
   const statusRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/status/${jobId}`, {
     headers: { Authorization: `Bearer ${env.RUNPOD_API_KEY}` },
   });
   const data = await statusRes.json();
 
   // Job အောင်မြင်စွာ ပြီးမြောက် (audio ထွက်) မှသာ credits ကို နုတ်ပါမည်
-  if (data.status === 'COMPLETED' && cost) {
+  // — status ကို ထပ်ခါထပ်ခါ poll လုပ်လည်း credits ကို တစ်ကြိမ်ထက်ပို၍ ထပ်နုတ်မဖြစ်စေရန်
+  if (data.status === 'COMPLETED' && cost && logRow.status !== 'COMPLETED') {
     await env.DB.prepare(
       `UPDATE users SET credits = COALESCE(credits, 0) - ?1, updated_at = datetime('now') WHERE id = ?2`
     )
-      .bind(Number(cost), user.id)
+      .bind(cost, user.id)
       .run();
     await logRequestUpdate(env, jobId, { status: 'COMPLETED', creditsCharged: cost, errorMessage: null });
   } else if (data.status === 'FAILED') {
@@ -1788,11 +1886,19 @@ async function handleApiV1GenerateStatus(request, env, corsHeaders) {
 // ===========================================================================
 
 async function handleSaveAudio(request, env, corsHeaders) {
-  const body = await request.json();
-  const { userId, audioBase64, format } = body;
+  const body = await request.json().catch(() => ({}));
+  const { initData, audioBase64, format } = body;
 
+  const userId = await getVerifiedTelegramUserId(initData, env);
+  if (!userId) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
   if (!audioBase64) {
     return json({ error: 'Missing audioBase64' }, 400, corsHeaders);
+  }
+  // storage abuse ကို ကာကွယ်ရန် — ခွင့်ပြုနိုင်တဲ့ audio size ကို ကန့်သတ်ပါသည် (~30MB base64)
+  if (audioBase64.length > 30 * 1024 * 1024) {
+    return json({ error: 'Audio file သိပ်ကြီးလွန်းပါသည်' }, 413, corsHeaders);
   }
 
   await env.DB.prepare(
@@ -1809,7 +1915,7 @@ async function handleSaveAudio(request, env, corsHeaders) {
   await env.DB.prepare(
     `INSERT INTO audio_files (id, user_id, format, data, created_at) VALUES (?1, ?2, ?3, ?4, datetime('now'))`
   )
-    .bind(id, userId ? String(userId) : null, format || 'wav', audioBase64)
+    .bind(id, userId, format || 'wav', audioBase64)
     .run();
 
   // 1 ရက်ထက် ကြာသွားတဲ့ အဟောင်း audio များကို ရှင်းလင်းပါ (best-effort)
@@ -1855,14 +1961,22 @@ async function handleAudioDownload(id, env, corsHeaders) {
 // ===========================================================================
 
 async function handleSendTelegramAudio(request, env, corsHeaders) {
-  const body = await request.json();
-  const { userId, audioBase64, format } = body;
+  const body = await request.json().catch(() => ({}));
+  const { initData, audioBase64, format } = body;
 
+  // *** critical fix ***: ယခင်က client ပို့လိုက်တဲ့ userId ကို chat_id အဖြစ် တိုက်ရိုက်
+  // ယုံပြီးသုံးခဲ့တာကြောင့် hacker တစ်ယောက်က ဒီ endpoint ကို ဘယ် Telegram chat ID ကိုမဆို
+  // ဒီ bot ကနေတစ်ဆင့် audio spam ပို့တဲ့ open relay အဖြစ် အလွဲသုံးစားလုပ်နိုင်ခဲ့ပါတယ်။
+  // အခု initData ကို verify လုပ်ပြီး login ဝင်ထားသူ ကိုယ်တိုင်ရဲ့ chat id ကိုသာ ခွင့်ပြုပါသည်။
+  const userId = await getVerifiedTelegramUserId(initData, env);
   if (!userId) {
-    return json({ error: 'Missing userId' }, 400, corsHeaders);
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
   if (!audioBase64) {
     return json({ error: 'Missing audioBase64' }, 400, corsHeaders);
+  }
+  if (audioBase64.length > 30 * 1024 * 1024) {
+    return json({ error: 'Audio file သိပ်ကြီးလွန်းပါသည်' }, 413, corsHeaders);
   }
   if (!env.TELEGRAM_BOT_TOKEN) {
     return json({ error: 'Telegram bot token မရှိပါ' }, 500, corsHeaders);
@@ -1876,7 +1990,7 @@ async function handleSendTelegramAudio(request, env, corsHeaders) {
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
 
   const form = new FormData();
-  form.append('chat_id', String(userId));
+  form.append('chat_id', userId);
   form.append('audio', new Blob([bytes], { type: mime }), `voice-output.${fmt}`);
   form.append('caption', 'Ko Paing AI Voice Studio 🎙️');
 
@@ -1893,9 +2007,12 @@ async function handleSendTelegramAudio(request, env, corsHeaders) {
   return json({ success: true }, 200, corsHeaders);
 }
 
-async function verifyTelegramAuth(initData, botToken) {
+async function verifyTelegramAuth(initData, botToken, maxAgeSeconds) {
+  if (!initData || !botToken) return false;
+
   const urlParams = new URLSearchParams(initData);
   const hash = urlParams.get('hash');
+  if (!hash) return false;
   urlParams.delete('hash');
 
   const params = [];
@@ -1931,7 +2048,42 @@ async function verifyTelegramAuth(initData, botToken) {
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
 
-  return hexSignature === hash;
+  if (!constantTimeEqual(hexSignature, hash)) return false;
+
+  // Replay protection: Telegram ပေးတဲ့ auth_date ဟာ maxAgeSeconds ထက် ဟောင်းနေရင် ငြင်းပယ်မည်
+  // (ဆိုလိုသည်မှာ ဟောင်းနေတဲ့ initData string ကို ပြန်လည် capture လုပ်ပြီး replay attack လုပ်တာကို ကာကွယ်ရန်)
+  if (maxAgeSeconds) {
+    const authDate = parseInt(urlParams.get('auth_date') || '0', 10);
+    if (!authDate) return false;
+    const ageSeconds = Math.floor(Date.now() / 1000) - authDate;
+    if (ageSeconds < 0 || ageSeconds > maxAgeSeconds) return false;
+  }
+
+  return true;
+}
+
+// Constant-time string comparison — hash တွေကို compare လုပ်တဲ့အခါ timing attack ကို ရှောင်ရန်
+function constantTimeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+// initData ကို verify လုပ်ပြီး signature မှန်ကန်မှန်ကန် အတည်ပြုနိုင်မှသာ user id ကို ပြန်ပေးမည်
+// *** client ကနေ ပို့လိုက်တဲ့ userId field ကို ဘယ်တော့မှ တိုက်ရိုက်မယုံပါနှင့် — ဒီ function ကနေရတဲ့ id ကိုသာ သုံးပါ ***
+async function getVerifiedTelegramUserId(initData, env) {
+  const isValid = await verifyTelegramAuth(initData, env.TELEGRAM_BOT_TOKEN, 86400);
+  if (!isValid) return null;
+  try {
+    const urlParams = new URLSearchParams(initData);
+    const user = JSON.parse(urlParams.get('user') || 'null');
+    return user && user.id != null ? String(user.id) : null;
+  } catch (e) {
+    return null;
+  }
 }
 
 // ===========================================================================
@@ -3131,8 +3283,12 @@ ${FAVICON}
 (function(){
   const $ = id => document.getElementById(id);
 
+  const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
   let tgUser = null;
   try { tgUser = JSON.parse(sessionStorage.getItem('tg_user') || 'null'); } catch(e){}
+  // Server ဘက်က request တိုင်းကို Telegram initData signature နဲ့ အသစ်ပြန် verify လုပ်ပါသည်
+  // (userId ကို client ကနေ တိုက်ရိုက် မယုံတော့ပါ) — ဒါကြောင့် initData ကို fetch တိုင်းမှာ ထည့်ပို့ရပါမည်
+  function currentInitData() { return tg && tg.initData ? tg.initData : null; }
 
   const textEl       = $('textInput');
   const charLenEl     = $('charLen');
@@ -3223,7 +3379,7 @@ ${FAVICON}
       const res = await fetch('/api/user/get', {
         method:'POST',
         headers:{ 'Content-Type':'application/json' },
-        body: JSON.stringify({ userId: tgUser.id })
+        body: JSON.stringify({ initData: currentInitData() })
       });
       const data = await res.json();
       currentCredits = data.user ? (data.user.credits || 0) : 0;
@@ -3309,7 +3465,7 @@ ${FAVICON}
         method:'POST',
         headers:{ 'Content-Type':'application/json' },
         body: JSON.stringify({
-          userId: tgUser.id,
+          initData: currentInitData(),
           text,
           refAudioBase64: presetVoiceSelect.value ? undefined : (refAudioBase64 || undefined),
           promptText: promptTextEl.value.trim() || undefined,
@@ -3348,7 +3504,7 @@ ${FAVICON}
       const res = await fetch('/api/generate/status', {
         method:'POST',
         headers:{ 'Content-Type':'application/json' },
-        body: JSON.stringify({ userId: tgUser.id, jobId, cost })
+        body: JSON.stringify({ initData: currentInitData(), jobId })
       });
       const data = await res.json();
 
@@ -3398,7 +3554,7 @@ ${FAVICON}
       const res = await fetch('/api/generate/send-telegram', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: tgUser.id, audioBase64: lastAudioBase64, format: lastAudioFormat })
+        body: JSON.stringify({ initData: currentInitData(), audioBase64: lastAudioBase64, format: lastAudioFormat })
       });
       const data = await res.json();
       if (res.ok && data.success) {
@@ -3523,8 +3679,10 @@ function getPlansHtml() {
   </div>
 
   <script>
+    const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
     let tgUser = null;
     try { tgUser = JSON.parse(sessionStorage.getItem('tg_user') || 'null'); } catch(e){}
+    function currentInitData() { return tg && tg.initData ? tg.initData : null; }
 
     let selectedPlan = null;
     let slipBase64 = null;
@@ -3621,7 +3779,7 @@ function getPlansHtml() {
         const res = await fetch('/api/purchase/submit', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userId: tgUser.id, planId: selectedPlan.id, slipImageBase64: slipBase64 })
+          body: JSON.stringify({ initData: currentInitData(), planId: selectedPlan.id, slipImageBase64: slipBase64 })
         });
         const data = await res.json();
         if (res.ok && data.success) {
@@ -3730,8 +3888,10 @@ function getProfileHtml() {
   <div id="wrap"><div class="empty">Loading…</div></div>
 
   <script>
+    const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
     let tgUser = null;
     try { tgUser = JSON.parse(sessionStorage.getItem('tg_user') || 'null'); } catch(e){}
+    function currentInitData() { return tg && tg.initData ? tg.initData : null; }
 
     if (!tgUser || !tgUser.id) {
       document.getElementById('wrap').innerHTML = '<div class="empty">Telegram App ကနေ ပြန်ဝင်ပေးပါ။</div>';
@@ -3746,7 +3906,7 @@ function getProfileHtml() {
       try {
         const res = await fetch('/api/profile/get', {
           method: 'POST', headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ userId: tgUser.id })
+          body: JSON.stringify({ initData: currentInitData() })
         });
         const data = await res.json();
         if (!res.ok || !data.success) {
@@ -3842,7 +4002,7 @@ function getProfileHtml() {
       try {
         const res = await fetch('/api/profile/requests', {
           method: 'POST', headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ userId: tgUser.id })
+          body: JSON.stringify({ initData: currentInitData() })
         });
         const data = await res.json();
         if (!res.ok || !data.success) {
@@ -3910,7 +4070,7 @@ function getProfileHtml() {
       try {
         const res = await fetch('/api/profile/api-key/generate', {
           method: 'POST', headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ userId: tgUser.id })
+          body: JSON.stringify({ initData: currentInitData() })
         });
         const data = await res.json();
         if (res.ok && data.success) {
@@ -3938,7 +4098,7 @@ function getProfileHtml() {
       try {
         const res = await fetch('/api/profile/api-key/revoke', {
           method: 'POST', headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ userId: tgUser.id })
+          body: JSON.stringify({ initData: currentInitData() })
         });
         const data = await res.json();
         if (res.ok && data.success) {
@@ -4067,10 +4227,9 @@ function getApiDocsHtml() {
   <h3>Request Body</h3>
   <pre>{
   "apiKey": "kpv_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-  "jobId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-  "cost": 9
+  "jobId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 }</pre>
-  <p style="font-size:12px; color:#888;">(<code>cost</code> ကို ပါထည့်ပေးပါ — status <code>COMPLETED</code> ဖြစ်မှသာ ဒီ credits ကို နုတ်ယူပါမည်။ fail/cancel ဖြစ်ရင် ဘာမှ မနုတ်ပါ)</p>
+  <p style="font-size:12px; color:#888;">(status <code>COMPLETED</code> ဖြစ်မှသာ credits ကို နုတ်ယူပါမည် — ကုန်ကျမည့် cost ကို server ဘက်ကနေသာ တွက်ချက်ပါသည်, fail/cancel ဖြစ်ရင် ဘာမှ မနုတ်ပါ)</p>
 
   <h3>Response — Processing</h3>
   <pre>{ "id": "...", "status": "IN_PROGRESS" }</pre>
