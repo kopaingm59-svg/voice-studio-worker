@@ -493,11 +493,74 @@ async function handleTelegramAuth(request, env, corsHeaders) {
   );
 }
 
+// ---- Admin login brute-force protection ------------------------------------
+// Admin password ကို script နဲ့ ဆက်တိုက် guess လုပ်နိုင်တာကို ကာကွယ်ရန် — IP တစ်ခုက
+// short window ထဲမှာ fail ဖြစ်တာ အကြိမ်များနေရင် ခဏ block ထားမည် (table ကို
+// လိုအပ်ရင် အလိုအလျောက် create လုပ်ပေးမည်၊ manual migration မလိုပါ)
+const ADMIN_LOGIN_MAX_ATTEMPTS = 5;
+const ADMIN_LOGIN_WINDOW_SECONDS = 300; // 5 minutes
+
+async function ensureAdminAttemptsTable(env) {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS admin_login_attempts (ip TEXT NOT NULL, attempted_at TEXT NOT NULL)`
+  ).run();
+}
+
+async function isAdminLoginLocked(env, ip) {
+  try {
+    await ensureAdminAttemptsTable(env);
+    const row = await env.DB.prepare(
+      `SELECT COUNT(*) AS cnt FROM admin_login_attempts WHERE ip = ?1 AND attempted_at > datetime('now', ?2)`
+    )
+      .bind(ip, `-${ADMIN_LOGIN_WINDOW_SECONDS} seconds`)
+      .first();
+    return (row ? Number(row.cnt) : 0) >= ADMIN_LOGIN_MAX_ATTEMPTS;
+  } catch (e) {
+    return false; // logging ကျရင် login ကို လုံးဝ ပိတ်မထားစေရန်
+  }
+}
+
+async function recordAdminLoginFailure(env, ip) {
+  try {
+    await ensureAdminAttemptsTable(env);
+    await env.DB.prepare(`INSERT INTO admin_login_attempts (ip, attempted_at) VALUES (?1, datetime('now'))`)
+      .bind(ip)
+      .run();
+  } catch (e) {
+    // ignore
+  }
+}
+
+// ---- Per-user generate rate limit -------------------------------------------
+// hacker (သို့) user ကိုယ်တိုင်က script နဲ့ /api/generate ကို ဆက်တိုက် spam ခေါ်ပြီး
+// RunPod ကုန်ကျစရိတ်တက်စေခြင်း/ server overload ဖြစ်စေခြင်းကို ကာကွယ်ရန်
+const GENERATE_RATE_LIMIT = 6;
+const GENERATE_RATE_WINDOW_SECONDS = 60;
+
+async function isGenerateRateLimited(env, userId) {
+  try {
+    const row = await env.DB.prepare(
+      `SELECT COUNT(*) AS cnt FROM request_logs WHERE user_id = ?1 AND created_at > datetime('now', ?2)`
+    )
+      .bind(userId, `-${GENERATE_RATE_WINDOW_SECONDS} seconds`)
+      .first();
+    return (row ? Number(row.cnt) : 0) >= GENERATE_RATE_LIMIT;
+  } catch (e) {
+    return false; // request_logs မရှိသေးရင်တောင် voice generation ကို ဆက်လက်အလုပ်လုပ်စေရန်
+  }
+}
+
 async function handleAdminAuth(request, env, corsHeaders) {
-  const body = await request.json();
+  const body = await request.json().catch(() => ({}));
   const { password } = body;
+  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+
+  if (await isAdminLoginLocked(env, ip)) {
+    return json({ error: 'ကြိမ်ဖန်များစွာ မှားနေပါသည် — ၅ မိနစ်ခန့် စောင့်ပြီးမှ ထပ်ကြိုးစားပါ' }, 429, corsHeaders);
+  }
 
   if (!password || !constantTimeEqual(String(password), String(env.ADMIN_SECRET || ''))) {
+    await recordAdminLoginFailure(env, ip);
     return json({ error: 'Invalid Password' }, 401, corsHeaders);
   }
 
@@ -708,6 +771,10 @@ async function handleAdminVoicePresetCreate(request, env, corsHeaders) {
   // ချထားပါသည် (~1.8MB base64 ≈ ~1.35MB actual audio)။
   if (audioBase64.length > 1_800_000) {
     return json({ error: 'Audio file အရွယ်အစား ကြီးလွန်းပါသည် — စက္ကန့်အနည်းငယ်ရှိတဲ့ file တို လေး တစ်ခု သုံးပေးပါ' }, 400, corsHeaders);
+  }
+  const presetAudioBytes = safeDecodeBase64(audioBase64, 1_800_000);
+  if (!presetAudioBytes || !looksLikeAudio(presetAudioBytes)) {
+    return json({ error: 'Audio format ကို မှတ်မိပါ — .wav/.mp3/.ogg/.m4a/.flac file ဖြစ်ရပါမည်' }, 400, corsHeaders);
   }
 
   try {
@@ -1004,8 +1071,12 @@ async function handlePurchaseSubmit(request, env, corsHeaders) {
   if (!planId || !slipImageBase64) {
     return json({ error: 'planId, slip image လိုအပ်ပါသည်' }, 400, corsHeaders);
   }
-  if (slipImageBase64.length > 10 * 1024 * 1024) {
-    return json({ error: 'Slip image သိပ်ကြီးလွန်းပါသည်' }, 413, corsHeaders);
+  const slipBytes = safeDecodeBase64(slipImageBase64, 10 * 1024 * 1024);
+  if (!slipBytes) {
+    return json({ error: 'Slip image သိပ်ကြီးလွန်း (သို့) ပျက်နေပါသည်' }, 413, corsHeaders);
+  }
+  if (!looksLikeImage(slipBytes)) {
+    return json({ error: 'Slip image format မှားနေပါသည် (JPEG/PNG/WEBP ဖြစ်ရပါမည်)' }, 400, corsHeaders);
   }
 
   const plan = await env.DB.prepare('SELECT * FROM plans WHERE id = ?1 AND is_active = 1')
@@ -1137,6 +1208,13 @@ async function handleAdminBroadcast(request, env, corsHeaders) {
   }
   if (!env.TELEGRAM_BOT_TOKEN) {
     return json({ error: 'Telegram bot token မရှိပါ' }, 500, corsHeaders);
+  }
+  if (imageBase64) {
+    const rawImageBase64 = imageBase64.includes(',') ? imageBase64.split(',')[1] : imageBase64;
+    const broadcastImageBytes = safeDecodeBase64(rawImageBase64, 10 * 1024 * 1024);
+    if (!broadcastImageBytes || !looksLikeImage(broadcastImageBytes)) {
+      return json({ error: 'Image format ကို မှတ်မိပါ — .jpg/.png/.webp/.gif file ဖြစ်ရပါမည်' }, 400, corsHeaders);
+    }
   }
 
   const { results: users } = await env.DB.prepare(
@@ -1301,6 +1379,47 @@ function base64ToBytes(b64) {
   return bytes;
 }
 
+// base64 string ကို decode လုပ်ပြီး size limit ကျော်လွန်ခြင်း/format မမှန်ခြင်းများကို
+// server ဘက်ကနေ တိုက်ရိုက် စစ်ဆေးရန် — client က ပို့လိုက်တဲ့ base64 string ကို
+// "audioလို့ ဆို"/"ပုံလို့ ဆို" ဆိုတာနဲ့ လုံးဝ မယုံဘဲ magic-byte signature ကို အမှန်တကယ် စစ်သည်
+function safeDecodeBase64(b64, maxBytes) {
+  if (!b64 || typeof b64 !== 'string') return null;
+  let bytes;
+  try {
+    bytes = base64ToBytes(b64);
+  } catch (e) {
+    return null;
+  }
+  if (maxBytes && bytes.length > maxBytes) return null;
+  return bytes;
+}
+
+function looksLikeImage(bytes) {
+  if (!bytes || bytes.length < 12) return false;
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return true; // JPEG
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return true; // PNG
+  if (
+    bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+    bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
+  ) return true; // WEBP
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return true; // GIF
+  return false;
+}
+
+function looksLikeAudio(bytes) {
+  if (!bytes || bytes.length < 12) return false;
+  if (
+    bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+    bytes[8] === 0x57 && bytes[9] === 0x41 && bytes[10] === 0x56 && bytes[11] === 0x45
+  ) return true; // WAV
+  if (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) return true; // MP3 (ID3)
+  if (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) return true; // MP3 frame sync
+  if (bytes[0] === 0x4f && bytes[1] === 0x67 && bytes[2] === 0x67 && bytes[3] === 0x53) return true; // OGG
+  if (bytes[0] === 0x66 && bytes[1] === 0x4c && bytes[2] === 0x61 && bytes[3] === 0x43) return true; // FLAC
+  if (bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70) return true; // M4A/MP4
+  return false;
+}
+
 function bytesToBase64(bytes) {
   let binary = '';
   const chunkSize = 0x8000;
@@ -1412,11 +1531,26 @@ async function handleGenerateStart(request, env, corsHeaders) {
   if (userStatus && userStatus.is_banned) {
     return json({ error: 'သင့်အကောင့်ကို ပိတ်ထားပါသည်။ Admin ကို ဆက်သွယ်ပါ။' }, 403, corsHeaders);
   }
+  // Spam/abuse ကာကွယ်ရန် — 1 မိနစ်အတွင်း request အလွန်များနေရင် ခဏငြင်းပယ်ပါမည်
+  if (await isGenerateRateLimited(env, userId)) {
+    return json({ error: 'Request အလွန်များနေပါသည် — ခဏစောင့်ပြီး ထပ်ကြိုးစားပါ' }, 429, corsHeaders);
+  }
   if (!text || !text.trim()) {
     return json({ error: 'Text to speak လိုအပ်ပါသည်' }, 400, corsHeaders);
   }
   if (!env.RUNPOD_API_KEY || !env.RUNPOD_ENDPOINT_ID) {
     return json({ error: 'RunPod environment variables missing' }, 500, corsHeaders);
+  }
+  // Voice cloning အတွက် upload လုပ်လိုက်တဲ့ reference audio ဟုတ်/မဟုတ် magic-byte နဲ့
+  // server ဘက်ကနေ တကယ်စစ်ပါသည် — client က "audio" လို့ ဆိုတာနဲ့ မယုံပါ
+  if (refAudioBase64) {
+    const refBytes = safeDecodeBase64(refAudioBase64, 20 * 1024 * 1024);
+    if (!refBytes) {
+      return json({ error: 'Reference audio file သိပ်ကြီးလွန်း (သို့) ပျက်နေပါသည်' }, 400, corsHeaders);
+    }
+    if (!looksLikeAudio(refBytes)) {
+      return json({ error: 'Reference audio file format မှားနေပါသည်' }, 400, corsHeaders);
+    }
   }
 
   const cost = text.trim().length;
@@ -1752,6 +1886,15 @@ async function handleApiV1Generate(request, env, corsHeaders) {
   if (!env.RUNPOD_API_KEY || !env.RUNPOD_ENDPOINT_ID) {
     return json({ error: 'RunPod environment variables missing' }, 500, corsHeaders);
   }
+  if (refAudioBase64) {
+    const refBytes = safeDecodeBase64(refAudioBase64, 20 * 1024 * 1024);
+    if (!refBytes) {
+      return json({ error: 'Reference audio file သိပ်ကြီးလွန်း (သို့) ပျက်နေပါသည်' }, 400, corsHeaders);
+    }
+    if (!looksLikeAudio(refBytes)) {
+      return json({ error: 'Reference audio file format မှားနေပါသည်' }, 400, corsHeaders);
+    }
+  }
 
   const hash = await sha256Hex(apiKey);
   const user = await env.DB.prepare('SELECT id, credits, is_banned FROM users WHERE api_key_hash = ?1')
@@ -1763,6 +1906,9 @@ async function handleApiV1Generate(request, env, corsHeaders) {
   }
   if (user.is_banned) {
     return json({ error: 'Account banned' }, 403, corsHeaders);
+  }
+  if (await isGenerateRateLimited(env, String(user.id))) {
+    return json({ error: 'Request အလွန်များနေပါသည် — ခဏစောင့်ပြီး ထပ်ကြိုးစားပါ' }, 429, corsHeaders);
   }
 
   const cost = text.trim().length;
@@ -1896,9 +2042,14 @@ async function handleSaveAudio(request, env, corsHeaders) {
   if (!audioBase64) {
     return json({ error: 'Missing audioBase64' }, 400, corsHeaders);
   }
-  // storage abuse ကို ကာကွယ်ရန် — ခွင့်ပြုနိုင်တဲ့ audio size ကို ကန့်သတ်ပါသည် (~30MB base64)
-  if (audioBase64.length > 30 * 1024 * 1024) {
-    return json({ error: 'Audio file သိပ်ကြီးလွန်းပါသည်' }, 413, corsHeaders);
+  // storage abuse ကို ကာကွယ်ရန် — ခွင့်ပြုနိုင်တဲ့ audio size ကို ကန့်သတ်ပြီး format ကို
+  // magic-byte နဲ့ တကယ်စစ်ပါသည်
+  const saveAudioBytes = safeDecodeBase64(audioBase64, 30 * 1024 * 1024);
+  if (!saveAudioBytes) {
+    return json({ error: 'Audio file သိပ်ကြီးလွန်း (သို့) ပျက်နေပါသည်' }, 413, corsHeaders);
+  }
+  if (!looksLikeAudio(saveAudioBytes)) {
+    return json({ error: 'Audio file format မှားနေပါသည်' }, 400, corsHeaders);
   }
 
   await env.DB.prepare(
@@ -1975,8 +2126,12 @@ async function handleSendTelegramAudio(request, env, corsHeaders) {
   if (!audioBase64) {
     return json({ error: 'Missing audioBase64' }, 400, corsHeaders);
   }
-  if (audioBase64.length > 30 * 1024 * 1024) {
-    return json({ error: 'Audio file သိပ်ကြီးလွန်းပါသည်' }, 413, corsHeaders);
+  const sendAudioBytes = safeDecodeBase64(audioBase64, 30 * 1024 * 1024);
+  if (!sendAudioBytes) {
+    return json({ error: 'Audio file သိပ်ကြီးလွန်းပါသည် (သို့) format မမှန်ကန်ပါ' }, 413, corsHeaders);
+  }
+  if (!looksLikeAudio(sendAudioBytes)) {
+    return json({ error: 'Audio format ကို မှတ်မိပါ — .wav/.mp3/.ogg/.m4a/.flac file ဖြစ်ရပါမည်' }, 400, corsHeaders);
   }
   if (!env.TELEGRAM_BOT_TOKEN) {
     return json({ error: 'Telegram bot token မရှိပါ' }, 500, corsHeaders);
