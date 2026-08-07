@@ -1071,7 +1071,12 @@ async function handlePurchaseSubmit(request, env, corsHeaders) {
   if (!planId || !slipImageBase64) {
     return json({ error: 'planId, slip image လိုအပ်ပါသည်' }, 400, corsHeaders);
   }
-  const slipBytes = safeDecodeBase64(slipImageBase64, 10 * 1024 * 1024);
+  // frontend က FileReader.readAsDataURL() ရလဒ် (data:image/...;base64,xxxx ပုံစံ) တစ်ခုလုံးကို
+  // တိုက်ရိုက်ပို့ထားလို့ — magic-byte စစ်ရာမှာ prefix ကို ဖယ်ပြီးမှသာ decode လုပ်ရမည်
+  // (DB ထဲ သိမ်းမည့်တန်ဖိုးကတော့ admin dashboard က <img src="..."> အနေနဲ့ တိုက်ရိုက်သုံးနေလို့
+  // client ပို့လိုက်တဲ့ အတိုင်း full data URI ကိုပဲ မပြောင်းလဲဘဲ ဆက်သိမ်းမည်)
+  const rawSlipBase64 = slipImageBase64.includes(',') ? slipImageBase64.split(',')[1] : slipImageBase64;
+  const slipBytes = safeDecodeBase64(rawSlipBase64, 10 * 1024 * 1024);
   if (!slipBytes) {
     return json({ error: 'Slip image သိပ်ကြီးလွန်း (သို့) ပျက်နေပါသည်' }, 413, corsHeaders);
   }
