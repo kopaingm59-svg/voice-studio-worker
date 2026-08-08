@@ -254,6 +254,14 @@ async function getSetting(env, key, defaultValue) {
 // Bot Token ရှိထားပြီး user/admin က bot ကို chat စတင်ထားသူဖြစ်မှသာ (chat_id သိထားမှသာ)
 // message ပို့နိုင်ပါသည် — ဒါကြောင့် Mini App ကနေ login ဝင်ဖူးသူများသာ ပို့နိုင်ပါမည်။
 
+// Telegram sendMessage ကို parse_mode 'HTML' နဲ့ ခေါ်နေတာမို့ user-controlled text (name/username)
+// ကို message ထဲ ထည့်ရင် HTML tag အဖြစ် အလုပ်လုပ်နိုင်ပါတယ် (ဥပမာ <a href> link spoof) — ဒါကြောင့်
+// admin ဆီ ပို့တဲ့ notification ထဲမှာ user-controlled name/username ကို ဒီ function နဲ့ escape လုပ်ရမည်
+function escapeTelegramHtml(s) {
+  if (s === null || s === undefined) return '';
+  return String(s).split('&').join('&amp;').split('<').join('&lt;').split('>').join('&gt;');
+}
+
 async function sendTelegramMessage(env, chatId, text) {
   if (!env.TELEGRAM_BOT_TOKEN || !chatId) {
     return { ok: false, description: 'Telegram bot token (သို့) chat id မရှိပါ' };
@@ -1104,7 +1112,7 @@ async function handlePurchaseSubmit(request, env, corsHeaders) {
     .bind(String(userId))
     .first();
   const buyerLabel = buyerRow
-    ? (buyerRow.username ? `${buyerRow.name || 'User'} (@${buyerRow.username})` : (buyerRow.name || 'User'))
+    ? (buyerRow.username ? `${escapeTelegramHtml(buyerRow.name) || 'User'} (@${escapeTelegramHtml(buyerRow.username)})` : (escapeTelegramHtml(buyerRow.name) || 'User'))
     : 'User';
   await notifyAdminTelegram(
     env,
@@ -2554,6 +2562,19 @@ function getAdminDashboardHtml() {
   <div class="panel" id="panel-broadcast"></div>
 
   <script>
+    // Telegram display name/username တွေက user ကိုယ်တိုင် လွတ်လပ်စွာ ပြောင်းလို့ရလို့ (attacker-controlled
+    // ဖြစ်နိုင်လို့) — admin dashboard ထဲမှာ innerHTML နဲ့ ပြသတဲ့နေရာတိုင်းမှာ escape မလုပ်ရင်
+    // stored XSS ဖြစ်ပြီး admin ရဲ့ session token ကို ခိုးယူနိုင်ပါတယ်။ ဒါကြောင့် user-controlled
+    // text တိုင်းကို ဒီ function ကနေ ဖြတ်သွားရမည် (HTML tag/attribute အဖြစ် အလုပ်မလုပ်စေရန်)
+    function escapeHtml(s) {
+      if (s === null || s === undefined) return '';
+      return String(s)
+        .split('&').join('&amp;')
+        .split('<').join('&lt;')
+        .split('>').join('&gt;')
+        .split('"').join('&quot;')
+        .split("'").join('&#39;');
+    }
     const token = sessionStorage.getItem('admin_token');
     if (!token) window.location.href = '/';
 
@@ -2599,8 +2620,8 @@ function getAdminDashboardHtml() {
       const rows = data.users.map(u => \`
         <tr>
           <td>\${u.id}</td>
-          <td>\${u.name || '-'}</td>
-          <td>\${u.username ? '@' + u.username : '-'}</td>
+          <td>\${escapeHtml(u.name) || '-'}</td>
+          <td>\${u.username ? '@' + escapeHtml(u.username) : '-'}</td>
           <td>\${u.credits ?? 0}</td>
           <td>\${u.is_admin ? '<span class="badge">ADMIN</span>' : ''} \${u.is_banned ? '<span class="badge banned">BANNED</span>' : ''}</td>
           <td style="white-space:nowrap;">
@@ -2702,12 +2723,12 @@ function getAdminDashboardHtml() {
       }
       const rows = data.requests.map(r => \`
         <tr>
-          <td>\${r.user_name || '-'}\${r.user_username ? ' (@' + r.user_username + ')' : ''}<br><span style="color:#999;">\${r.user_id}</span></td>
+          <td>\${escapeHtml(r.user_name) || '-'}\${r.user_username ? ' (@' + escapeHtml(r.user_username) + ')' : ''}<br><span style="color:#999;">\${r.user_id}</span></td>
           <td>\${r.source === 'api' ? 'Public API' : 'Voice Studio'}</td>
           <td>\${r.text_length}</td>
           <td>\${requestStatusBadge(r.status)}</td>
           <td>\${r.credits_charged}</td>
-          <td style="max-width:200px; white-space:normal; color:#c0392b;">\${r.error_message || '-'}</td>
+          <td style="max-width:200px; white-space:normal; color:#c0392b;">\${escapeHtml(r.error_message) || '-'}</td>
           <td>\${new Date(r.created_at + 'Z').toLocaleString()}</td>
         </tr>
       \`).join('');
@@ -4105,6 +4126,10 @@ function getProfileHtml() {
   <div id="wrap"><div class="empty">Loading…</div></div>
 
   <script>
+    function escapeHtml(s) {
+      if (s === null || s === undefined) return "";
+      return String(s).split("&").join("&amp;").split("<").join("&lt;").split(">").join("&gt;");
+    }
     const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
     if (tg) { try { tg.ready(); } catch(e){} }
     let tgUser = null;
@@ -4149,7 +4174,7 @@ function getProfileHtml() {
             <div class="stat"><div class="n">\${u.referredCount ?? 0}</div><div class="l">Referred</div></div>
             <div class="stat"><div class="n">\${u.referralCreditsEarned ?? 0}</div><div class="l">Referral Credits</div></div>
           </div>
-          <div style="margin-top:12px; font-size:13px; color:#555;">\${u.name || ''}\${u.username ? ' · @' + u.username : ''}</div>
+          <div style="margin-top:12px; font-size:13px; color:#555;">\${escapeHtml(u.name) || ''}\${u.username ? ' · @' + escapeHtml(u.username) : ''}</div>
         </div>
 
         <div class="card">
