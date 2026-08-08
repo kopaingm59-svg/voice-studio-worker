@@ -493,11 +493,74 @@ async function handleTelegramAuth(request, env, corsHeaders) {
   );
 }
 
+// ---- Admin login brute-force protection ------------------------------------
+// Admin password ကို script နဲ့ ဆက်တိုက် guess လုပ်နိုင်တာကို ကာကွယ်ရန် — IP တစ်ခုက
+// short window ထဲမှာ fail ဖြစ်တာ အကြိမ်များနေရင် ခဏ block ထားမည် (table ကို
+// လိုအပ်ရင် အလိုအလျောက် create လုပ်ပေးမည်၊ manual migration မလိုပါ)
+const ADMIN_LOGIN_MAX_ATTEMPTS = 5;
+const ADMIN_LOGIN_WINDOW_SECONDS = 300; // 5 minutes
+
+async function ensureAdminAttemptsTable(env) {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS admin_login_attempts (ip TEXT NOT NULL, attempted_at TEXT NOT NULL)`
+  ).run();
+}
+
+async function isAdminLoginLocked(env, ip) {
+  try {
+    await ensureAdminAttemptsTable(env);
+    const row = await env.DB.prepare(
+      `SELECT COUNT(*) AS cnt FROM admin_login_attempts WHERE ip = ?1 AND attempted_at > datetime('now', ?2)`
+    )
+      .bind(ip, `-${ADMIN_LOGIN_WINDOW_SECONDS} seconds`)
+      .first();
+    return (row ? Number(row.cnt) : 0) >= ADMIN_LOGIN_MAX_ATTEMPTS;
+  } catch (e) {
+    return false; // logging ကျရင် login ကို လုံးဝ ပိတ်မထားစေရန်
+  }
+}
+
+async function recordAdminLoginFailure(env, ip) {
+  try {
+    await ensureAdminAttemptsTable(env);
+    await env.DB.prepare(`INSERT INTO admin_login_attempts (ip, attempted_at) VALUES (?1, datetime('now'))`)
+      .bind(ip)
+      .run();
+  } catch (e) {
+    // ignore
+  }
+}
+
+// ---- Per-user generate rate limit -------------------------------------------
+// hacker (သို့) user ကိုယ်တိုင်က script နဲ့ /api/generate ကို ဆက်တိုက် spam ခေါ်ပြီး
+// RunPod ကုန်ကျစရိတ်တက်စေခြင်း/ server overload ဖြစ်စေခြင်းကို ကာကွယ်ရန်
+const GENERATE_RATE_LIMIT = 100;
+const GENERATE_RATE_WINDOW_SECONDS = 60;
+
+async function isGenerateRateLimited(env, userId) {
+  try {
+    const row = await env.DB.prepare(
+      `SELECT COUNT(*) AS cnt FROM request_logs WHERE user_id = ?1 AND created_at > datetime('now', ?2)`
+    )
+      .bind(userId, `-${GENERATE_RATE_WINDOW_SECONDS} seconds`)
+      .first();
+    return (row ? Number(row.cnt) : 0) >= GENERATE_RATE_LIMIT;
+  } catch (e) {
+    return false; // request_logs မရှိသေးရင်တောင် voice generation ကို ဆက်လက်အလုပ်လုပ်စေရန်
+  }
+}
+
 async function handleAdminAuth(request, env, corsHeaders) {
-  const body = await request.json();
+  const body = await request.json().catch(() => ({}));
   const { password } = body;
+  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+
+  if (await isAdminLoginLocked(env, ip)) {
+    return json({ error: 'ကြိမ်ဖန်များစွာ မှားနေပါသည် — ၅ မိနစ်ခန့် စောင့်ပြီးမှ ထပ်ကြိုးစားပါ' }, 429, corsHeaders);
+  }
 
   if (!password || !constantTimeEqual(String(password), String(env.ADMIN_SECRET || ''))) {
+    await recordAdminLoginFailure(env, ip);
     return json({ error: 'Invalid Password' }, 401, corsHeaders);
   }
 
@@ -708,6 +771,10 @@ async function handleAdminVoicePresetCreate(request, env, corsHeaders) {
   // ချထားပါသည် (~1.8MB base64 ≈ ~1.35MB actual audio)။
   if (audioBase64.length > 1_800_000) {
     return json({ error: 'Audio file အရွယ်အစား ကြီးလွန်းပါသည် — စက္ကန့်အနည်းငယ်ရှိတဲ့ file တို လေး တစ်ခု သုံးပေးပါ' }, 400, corsHeaders);
+  }
+  const presetAudioBytes = safeDecodeBase64(audioBase64, 1_800_000);
+  if (!presetAudioBytes || !looksLikeAudio(presetAudioBytes)) {
+    return json({ error: 'Audio format ကို မှတ်မိပါ — .wav/.mp3/.ogg/.m4a/.flac file ဖြစ်ရပါမည်' }, 400, corsHeaders);
   }
 
   try {
@@ -1004,8 +1071,17 @@ async function handlePurchaseSubmit(request, env, corsHeaders) {
   if (!planId || !slipImageBase64) {
     return json({ error: 'planId, slip image လိုအပ်ပါသည်' }, 400, corsHeaders);
   }
-  if (slipImageBase64.length > 10 * 1024 * 1024) {
-    return json({ error: 'Slip image သိပ်ကြီးလွန်းပါသည်' }, 413, corsHeaders);
+  // frontend က FileReader.readAsDataURL() ရလဒ် (data:image/...;base64,xxxx ပုံစံ) တစ်ခုလုံးကို
+  // တိုက်ရိုက်ပို့ထားလို့ — magic-byte စစ်ရာမှာ prefix ကို ဖယ်ပြီးမှသာ decode လုပ်ရမည်
+  // (DB ထဲ သိမ်းမည့်တန်ဖိုးကတော့ admin dashboard က <img src="..."> အနေနဲ့ တိုက်ရိုက်သုံးနေလို့
+  // client ပို့လိုက်တဲ့ အတိုင်း full data URI ကိုပဲ မပြောင်းလဲဘဲ ဆက်သိမ်းမည်)
+  const rawSlipBase64 = slipImageBase64.includes(',') ? slipImageBase64.split(',')[1] : slipImageBase64;
+  const slipBytes = safeDecodeBase64(rawSlipBase64, 10 * 1024 * 1024);
+  if (!slipBytes) {
+    return json({ error: 'Slip image သိပ်ကြီးလွန်း (သို့) ပျက်နေပါသည်' }, 413, corsHeaders);
+  }
+  if (!looksLikeImage(slipBytes)) {
+    return json({ error: 'Slip image format မှားနေပါသည် (JPEG/PNG/WEBP ဖြစ်ရပါမည်)' }, 400, corsHeaders);
   }
 
   const plan = await env.DB.prepare('SELECT * FROM plans WHERE id = ?1 AND is_active = 1')
@@ -1137,6 +1213,13 @@ async function handleAdminBroadcast(request, env, corsHeaders) {
   }
   if (!env.TELEGRAM_BOT_TOKEN) {
     return json({ error: 'Telegram bot token မရှိပါ' }, 500, corsHeaders);
+  }
+  if (imageBase64) {
+    const rawImageBase64 = imageBase64.includes(',') ? imageBase64.split(',')[1] : imageBase64;
+    const broadcastImageBytes = safeDecodeBase64(rawImageBase64, 10 * 1024 * 1024);
+    if (!broadcastImageBytes || !looksLikeImage(broadcastImageBytes)) {
+      return json({ error: 'Image format ကို မှတ်မိပါ — .jpg/.png/.webp/.gif file ဖြစ်ရပါမည်' }, 400, corsHeaders);
+    }
   }
 
   const { results: users } = await env.DB.prepare(
@@ -1301,6 +1384,52 @@ function base64ToBytes(b64) {
   return bytes;
 }
 
+// base64 string ကို decode လုပ်ပြီး size limit ကျော်လွန်ခြင်း/format မမှန်ခြင်းများကို
+// server ဘက်ကနေ တိုက်ရိုက် စစ်ဆေးရန် — client က ပို့လိုက်တဲ့ base64 string ကို
+// "audioလို့ ဆို"/"ပုံလို့ ဆို" ဆိုတာနဲ့ လုံးဝ မယုံဘဲ magic-byte signature ကို အမှန်တကယ် စစ်သည်
+function safeDecodeBase64(b64, maxBytes) {
+  if (!b64 || typeof b64 !== 'string') return null;
+  let bytes;
+  try {
+    bytes = base64ToBytes(b64);
+  } catch (e) {
+    return null;
+  }
+  if (maxBytes && bytes.length > maxBytes) return null;
+  return bytes;
+}
+
+function looksLikeImage(bytes) {
+  if (!bytes || bytes.length < 12) return false;
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return true; // JPEG
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return true; // PNG
+  if (
+    bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+    bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
+  ) return true; // WEBP
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return true; // GIF
+  return false;
+}
+
+function looksLikeAudio(bytes) {
+  if (!bytes || bytes.length < 12) return false;
+  if (
+    bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+    bytes[8] === 0x57 && bytes[9] === 0x41 && bytes[10] === 0x56 && bytes[11] === 0x45
+  ) return true; // WAV
+  if (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) return true; // MP3 (ID3)
+  if (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) return true; // MP3 frame sync / AAC ADTS
+  if (bytes[0] === 0x4f && bytes[1] === 0x67 && bytes[2] === 0x67 && bytes[3] === 0x53) return true; // OGG
+  if (bytes[0] === 0x66 && bytes[1] === 0x4c && bytes[2] === 0x61 && bytes[3] === 0x43) return true; // FLAC
+  if (bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70) return true; // M4A/MP4/3GP (any ftyp brand)
+  if (bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3) return true; // WebM/Matroska (phone/browser recordings)
+  if (bytes[0] === 0x46 && bytes[1] === 0x4f && bytes[2] === 0x52 && bytes[3] === 0x4d) return true; // AIFF ("FORM")
+  if (
+    bytes[0] === 0x30 && bytes[1] === 0x26 && bytes[2] === 0xb2 && bytes[3] === 0x75
+  ) return true; // WMA (ASF container)
+  return false;
+}
+
 function bytesToBase64(bytes) {
   let binary = '';
   const chunkSize = 0x8000;
@@ -1398,6 +1527,20 @@ function mergeWavChunksBase64(audioBase64Chunks) {
   return bytesToBase64(finalBytes);
 }
 
+// RunPod ကနေ response ပြန်လာချိန် (network glitch, gateway timeout, RunPod ကိုယ်တိုင် down
+// စတာတွေကြောင့်) တခါတရံ JSON မဟုတ်ဘဲ HTML/plain-text error page ပြန်လာနိုင်ပါတယ်။ အဲဒါကို
+// try/catch မလုပ်ဘဲ .json() ခေါ်ရင် Worker တစ်ခုလုံး crash ဖြစ်ပြီး Cloudflare ရဲ့ own HTML
+// error page ကို client ဆီ ပြန်ပို့မိတတ်ပါတယ် (frontend မှာ "Unexpected token '<'" ဆိုပြီး
+// ပေါ်လာစေတဲ့ အကြောင်းရင်းပါ) — ဒီ helper က အဲဒါကို ဖမ်းပြီး clean JSON error အဖြစ် ပြန်ပေးပါတယ်
+async function safeJsonParse(res) {
+  const text = await res.text();
+  try {
+    return { ok: true, data: JSON.parse(text) };
+  } catch (e) {
+    return { ok: false, data: null, rawText: text.slice(0, 300) };
+  }
+}
+
 async function handleGenerateStart(request, env, corsHeaders) {
   const body = await request.json();
   const { initData, text, refAudioBase64, promptText, voiceType, voicePresetId } = body;
@@ -1412,11 +1555,26 @@ async function handleGenerateStart(request, env, corsHeaders) {
   if (userStatus && userStatus.is_banned) {
     return json({ error: 'သင့်အကောင့်ကို ပိတ်ထားပါသည်။ Admin ကို ဆက်သွယ်ပါ။' }, 403, corsHeaders);
   }
+  // Spam/abuse ကာကွယ်ရန် — 1 မိနစ်အတွင်း request အလွန်များနေရင် ခဏငြင်းပယ်ပါမည်
+  if (await isGenerateRateLimited(env, userId)) {
+    return json({ error: 'Request အလွန်များနေပါသည် — ခဏစောင့်ပြီး ထပ်ကြိုးစားပါ' }, 429, corsHeaders);
+  }
   if (!text || !text.trim()) {
     return json({ error: 'Text to speak လိုအပ်ပါသည်' }, 400, corsHeaders);
   }
   if (!env.RUNPOD_API_KEY || !env.RUNPOD_ENDPOINT_ID) {
     return json({ error: 'RunPod environment variables missing' }, 500, corsHeaders);
+  }
+  // Voice cloning အတွက် upload လုပ်လိုက်တဲ့ reference audio ဟုတ်/မဟုတ် magic-byte နဲ့
+  // server ဘက်ကနေ တကယ်စစ်ပါသည် — client က "audio" လို့ ဆိုတာနဲ့ မယုံပါ
+  if (refAudioBase64) {
+    const refBytes = safeDecodeBase64(refAudioBase64, 20 * 1024 * 1024);
+    if (!refBytes) {
+      return json({ error: 'Reference audio file သိပ်ကြီးလွန်း (သို့) ပျက်နေပါသည်' }, 400, corsHeaders);
+    }
+    if (!looksLikeAudio(refBytes)) {
+      return json({ error: 'Reference audio file format မှားနေပါသည်' }, 400, corsHeaders);
+    }
   }
 
   const cost = text.trim().length;
@@ -1452,30 +1610,47 @@ async function handleGenerateStart(request, env, corsHeaders) {
   // (chunk တစ်ခုတည်းရှိရင် ယခင်အတိုင်း job တစ်ခုတည်းသာ ဖြစ်မည်)
   const textChunks = splitTextForTts(text.trim(), TTS_CHUNK_MAX_CHARS, voiceType);
 
-  const jobIds = [];
-  for (const chunkText of textChunks) {
-    const input = { text: chunkText };
-    if (finalRefAudio) {
-      input.reference_audio_base64 = finalRefAudio;
-      if (finalPromptText && finalPromptText.trim()) input.prompt_text = finalPromptText.trim();
-    }
-    if (voiceType) input.voice_type = voiceType;
+  // *** fix ***: chunk အားလုံးကို sequential (တစ်ခုပြီးမှ တစ်ခု) fetch မလုပ်တော့ဘဲ Promise.all
+  // နဲ့ တစ်ပြိုင်နက် ပို့လိုက်ပါတယ် — sequential ဆိုရင် chunk 14-15 ခုအတွက် RunPod ကို ဆက်တိုက်
+  // ခေါ်ရင်း (round-trip time အများကြီး ပေါင်းသွားပြီး) Cloudflare Worker ရဲ့ request time limit
+  // ကို ထိသွားနိုင်ပါတယ် — ထိသွားရင် Cloudflare ကိုယ်တိုင်က JSON မဟုတ်ဘဲ HTML timeout error page
+  // ပြန်ပေးလိုက်လို့ frontend မှာ "Unexpected token '<'" ပေါ်လာခဲ့တာပါ (text ရှည်လေ chunk များလေ၊
+  // sequential ခေါ်ချိန်ကြာလေ ဖြစ်ခွင့်များလေ ဖြစ်ပါတယ်) — parallel ခေါ်လိုက်ရင် စုစုပေါင်းချိန် chunk
+  // အရေအတွက်ပေါ် မမူတည်တော့ဘဲ တစ်ခုတည်းရဲ့ ကြာချိန်ခန့်ပဲ ကြာမည်ဖြစ်လို့ timeout ဖြစ်ခွင့် အများကြီးလျော့သွားပါမည်
+  const chunkResults = await Promise.all(
+    textChunks.map(async (chunkText) => {
+      const input = { text: chunkText };
+      if (finalRefAudio) {
+        input.reference_audio_base64 = finalRefAudio;
+        if (finalPromptText && finalPromptText.trim()) input.prompt_text = finalPromptText.trim();
+      }
+      if (voiceType) input.voice_type = voiceType;
 
-    const runRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/run`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${env.RUNPOD_API_KEY}`,
-      },
-      body: JSON.stringify({ input }),
-    });
+      const runRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/run`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${env.RUNPOD_API_KEY}`,
+        },
+        body: JSON.stringify({ input }),
+      });
 
-    const runData = await runRes.json();
-    if (!runRes.ok || !runData.id) {
-      return json({ error: runData.error || 'RunPod request failed' }, 500, corsHeaders);
-    }
-    jobIds.push(runData.id);
+      const parsed = await safeJsonParse(runRes);
+      if (!parsed.ok) {
+        return { error: 'RunPod ကနေ response မှားနေပါသည် — ခဏနေမှ ထပ်ကြိုးစားပါ (server ခေတ္တ busy ဖြစ်နေနိုင်ပါသည်)' };
+      }
+      if (!runRes.ok || !parsed.data.id) {
+        return { error: parsed.data.error || 'RunPod request failed' };
+      }
+      return { id: parsed.data.id };
+    })
+  );
+
+  const failedChunk = chunkResults.find((r) => r.error);
+  if (failedChunk) {
+    return json({ error: failedChunk.error }, 502, corsHeaders);
   }
+  const jobIds = chunkResults.map((r) => r.id);
 
   // Credits ကို job အောင်မြင်စွာ ပြီးမြောက်မှသာ နုတ်ပါမည် (handleGenerateStatus ထဲမှာ)
   // — user တစ်ယောက် job မအောင်မြင်ခဲ့ရင် ဘာမှ ဆုံးရှုံးမှု မရှိစေရန်
@@ -1552,7 +1727,14 @@ async function fetchSingleJobStatus(jobId, env) {
   const statusRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/status/${jobId}`, {
     headers: { Authorization: `Bearer ${env.RUNPOD_API_KEY}` },
   });
-  return await statusRes.json();
+  const parsed = await safeJsonParse(statusRes);
+  if (!parsed.ok) {
+    // RunPod ကနေ ခဏတာ non-JSON (gateway hiccup) ပြန်လာတာကို job ပျက်သွားသလို မယူဆဘဲ
+    // "IN_PROGRESS" အဖြစ် ယူဆပြီး frontend ကို ဆက် poll လုပ်ခိုင်းမည် — transient error
+    // တစ်ခုကြောင့် job တစ်ခုလုံး FAILED/crash မဖြစ်စေရန်
+    return { id: jobId, status: 'IN_PROGRESS' };
+  }
+  return parsed.data;
 }
 
 // ---- multiple (chunked) job status: poll all, merge audio once all COMPLETED ----
@@ -1752,6 +1934,15 @@ async function handleApiV1Generate(request, env, corsHeaders) {
   if (!env.RUNPOD_API_KEY || !env.RUNPOD_ENDPOINT_ID) {
     return json({ error: 'RunPod environment variables missing' }, 500, corsHeaders);
   }
+  if (refAudioBase64) {
+    const refBytes = safeDecodeBase64(refAudioBase64, 20 * 1024 * 1024);
+    if (!refBytes) {
+      return json({ error: 'Reference audio file သိပ်ကြီးလွန်း (သို့) ပျက်နေပါသည်' }, 400, corsHeaders);
+    }
+    if (!looksLikeAudio(refBytes)) {
+      return json({ error: 'Reference audio file format မှားနေပါသည်' }, 400, corsHeaders);
+    }
+  }
 
   const hash = await sha256Hex(apiKey);
   const user = await env.DB.prepare('SELECT id, credits, is_banned FROM users WHERE api_key_hash = ?1')
@@ -1763,6 +1954,9 @@ async function handleApiV1Generate(request, env, corsHeaders) {
   }
   if (user.is_banned) {
     return json({ error: 'Account banned' }, 403, corsHeaders);
+  }
+  if (await isGenerateRateLimited(env, String(user.id))) {
+    return json({ error: 'Request အလွန်များနေပါသည် — ခဏစောင့်ပြီး ထပ်ကြိုးစားပါ' }, 429, corsHeaders);
   }
 
   const cost = text.trim().length;
@@ -1804,7 +1998,15 @@ async function handleApiV1Generate(request, env, corsHeaders) {
     body: JSON.stringify({ input }),
   });
 
-  const runData = await runRes.json();
+  const runData_parsed = await safeJsonParse(runRes);
+  if (!runData_parsed.ok) {
+    return json(
+      { error: 'RunPod ကနေ response မှားနေပါသည် — ခဏနေမှ ထပ်ကြိုးစားပါ' },
+      502,
+      corsHeaders
+    );
+  }
+  const runData = runData_parsed.data;
   if (!runRes.ok || !runData.id) {
     return json({ error: runData.error || 'RunPod request failed' }, 500, corsHeaders);
   }
@@ -1856,7 +2058,8 @@ async function handleApiV1GenerateStatus(request, env, corsHeaders) {
   const statusRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/status/${jobId}`, {
     headers: { Authorization: `Bearer ${env.RUNPOD_API_KEY}` },
   });
-  const data = await statusRes.json();
+  const statusParsed = await safeJsonParse(statusRes);
+  const data = statusParsed.ok ? statusParsed.data : { status: 'IN_PROGRESS' };
 
   // Job အောင်မြင်စွာ ပြီးမြောက် (audio ထွက်) မှသာ credits ကို နုတ်ပါမည်
   // — status ကို ထပ်ခါထပ်ခါ poll လုပ်လည်း credits ကို တစ်ကြိမ်ထက်ပို၍ ထပ်နုတ်မဖြစ်စေရန်
@@ -1896,9 +2099,14 @@ async function handleSaveAudio(request, env, corsHeaders) {
   if (!audioBase64) {
     return json({ error: 'Missing audioBase64' }, 400, corsHeaders);
   }
-  // storage abuse ကို ကာကွယ်ရန် — ခွင့်ပြုနိုင်တဲ့ audio size ကို ကန့်သတ်ပါသည် (~30MB base64)
-  if (audioBase64.length > 30 * 1024 * 1024) {
-    return json({ error: 'Audio file သိပ်ကြီးလွန်းပါသည်' }, 413, corsHeaders);
+  // storage abuse ကို ကာကွယ်ရန် — ခွင့်ပြုနိုင်တဲ့ audio size ကို ကန့်သတ်ပြီး format ကို
+  // magic-byte နဲ့ တကယ်စစ်ပါသည်
+  const saveAudioBytes = safeDecodeBase64(audioBase64, 30 * 1024 * 1024);
+  if (!saveAudioBytes) {
+    return json({ error: 'Audio file သိပ်ကြီးလွန်း (သို့) ပျက်နေပါသည်' }, 413, corsHeaders);
+  }
+  if (!looksLikeAudio(saveAudioBytes)) {
+    return json({ error: 'Audio file format မှားနေပါသည်' }, 400, corsHeaders);
   }
 
   await env.DB.prepare(
@@ -1975,8 +2183,12 @@ async function handleSendTelegramAudio(request, env, corsHeaders) {
   if (!audioBase64) {
     return json({ error: 'Missing audioBase64' }, 400, corsHeaders);
   }
-  if (audioBase64.length > 30 * 1024 * 1024) {
-    return json({ error: 'Audio file သိပ်ကြီးလွန်းပါသည်' }, 413, corsHeaders);
+  const sendAudioBytes = safeDecodeBase64(audioBase64, 30 * 1024 * 1024);
+  if (!sendAudioBytes) {
+    return json({ error: 'Audio file သိပ်ကြီးလွန်းပါသည် (သို့) format မမှန်ကန်ပါ' }, 413, corsHeaders);
+  }
+  if (!looksLikeAudio(sendAudioBytes)) {
+    return json({ error: 'Audio format ကို မှတ်မိပါ — .wav/.mp3/.ogg/.m4a/.flac file ဖြစ်ရပါမည်' }, 400, corsHeaders);
   }
   if (!env.TELEGRAM_BOT_TOKEN) {
     return json({ error: 'Telegram bot token မရှိပါ' }, 500, corsHeaders);
