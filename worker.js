@@ -1079,12 +1079,22 @@ async function handlePurchaseSubmit(request, env, corsHeaders) {
   if (!planId || !slipImageBase64) {
     return json({ error: 'planId, slip image လိုအပ်ပါသည်' }, 400, corsHeaders);
   }
+  // D1 (Cloudflare SQLite) မှာ column/parameter တစ်ခုစီအတွက် သိမ်းနိုင်တဲ့ size limit
+  // ရှိပါတယ် — ဒါထက်ကျော်ရင် "SQLITE_TOOBIG" error နဲ့ insert မအောင်မြင်ပါ။ ဒါကြောင့်
+  // frontend က resize/compress လုပ်ပြီးသားပေမယ့် server ဘက်ကလည်း အတည်ပြု စစ်ဆေးထားသည်
+  if (slipImageBase64.length > 1_400_000) {
+    return json(
+      { error: 'Slip image ဖိုင် size သိပ်ကြီးလွန်းပါသည် — ပုံ ပိုသေးအောင် (screenshot/compress) ပြန်ရိုက်ပြီး ထပ်တင်ပေးပါ' },
+      413,
+      corsHeaders
+    );
+  }
   // frontend က FileReader.readAsDataURL() ရလဒ် (data:image/...;base64,xxxx ပုံစံ) တစ်ခုလုံးကို
   // တိုက်ရိုက်ပို့ထားလို့ — magic-byte စစ်ရာမှာ prefix ကို ဖယ်ပြီးမှသာ decode လုပ်ရမည်
   // (DB ထဲ သိမ်းမည့်တန်ဖိုးကတော့ admin dashboard က <img src="..."> အနေနဲ့ တိုက်ရိုက်သုံးနေလို့
   // client ပို့လိုက်တဲ့ အတိုင်း full data URI ကိုပဲ မပြောင်းလဲဘဲ ဆက်သိမ်းမည်)
   const rawSlipBase64 = slipImageBase64.includes(',') ? slipImageBase64.split(',')[1] : slipImageBase64;
-  const slipBytes = safeDecodeBase64(rawSlipBase64, 10 * 1024 * 1024);
+  const slipBytes = safeDecodeBase64(rawSlipBase64, 1_400_000);
   if (!slipBytes) {
     return json({ error: 'Slip image သိပ်ကြီးလွန်း (သို့) ပျက်နေပါသည်' }, 413, corsHeaders);
   }
@@ -2108,8 +2118,12 @@ async function handleSaveAudio(request, env, corsHeaders) {
     return json({ error: 'Missing audioBase64' }, 400, corsHeaders);
   }
   // storage abuse ကို ကာကွယ်ရန် — ခွင့်ပြုနိုင်တဲ့ audio size ကို ကန့်သတ်ပြီး format ကို
-  // magic-byte နဲ့ တကယ်စစ်ပါသည်
-  const saveAudioBytes = safeDecodeBase64(audioBase64, 30 * 1024 * 1024);
+  // magic-byte နဲ့ တကယ်စစ်ပါသည် (D1 database ရဲ့ column size limit ထက် မကျော်စေရန်လည်း ဖြစ်သည်
+  // — မဟုတ်ရင် "SQLITE_TOOBIG" error တက်နိုင်ပါသည်)
+  if (audioBase64.length > 1_400_000) {
+    return json({ error: 'Audio file သိပ်ကြီးလွန်းပါသည် (max ~1MB)' }, 413, corsHeaders);
+  }
+  const saveAudioBytes = safeDecodeBase64(audioBase64, 1_400_000);
   if (!saveAudioBytes) {
     return json({ error: 'Audio file သိပ်ကြီးလွန်း (သို့) ပျက်နေပါသည်' }, 413, corsHeaders);
   }
@@ -3997,13 +4011,35 @@ function getPlansHtml() {
     document.getElementById('slipInput').addEventListener('change', e => {
       const file = e.target.files[0];
       if (!file) return;
+      const msg = document.getElementById('purchaseMsg');
+      msg.textContent = 'ပုံ readied လုပ်နေသည်…';
+      msg.className = 'msg';
+      // ဖုန်းကင်မရာနဲ့ တိုက်ရိုက်ရိုက်တဲ့ ဓာတ်ပုံဟာ 3-8MB လောက် ရှိတတ်ပြီး၊ D1 database ထဲ
+      // သိမ်းနိုင်တဲ့ size ထက် ကျော်လွန်တတ်ပါတယ် — ဒါကြောင့် upload မလုပ်ခင် max 1280px အထိ
+      // ချုံ့ပြီး JPEG အဖြစ် ပြန် encode လုပ်ကာ file size ကို လျှော့ချပါသည် (image quality အတော်
+      // အတန် ထိန်းထားနိုင်ပြီး slip ကို ဖတ်ရလွယ်ပါသေးတယ်)
       const reader = new FileReader();
       reader.onload = () => {
-        slipBase64 = reader.result;
-        const img = document.getElementById('slipPreview');
-        img.src = slipBase64;
-        img.style.display = 'block';
-        document.getElementById('uploadLabel').style.display = 'none';
+        const img = new Image();
+        img.onload = () => {
+          const MAX_DIM = 1280;
+          let w = img.width, h = img.height;
+          if (w > MAX_DIM || h > MAX_DIM) {
+            if (w >= h) { h = Math.round(h * MAX_DIM / w); w = MAX_DIM; }
+            else { w = Math.round(w * MAX_DIM / h); h = MAX_DIM; }
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = w; canvas.height = h;
+          canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+          slipBase64 = canvas.toDataURL('image/jpeg', 0.72);
+          const preview = document.getElementById('slipPreview');
+          preview.src = slipBase64;
+          preview.style.display = 'block';
+          document.getElementById('uploadLabel').style.display = 'none';
+          msg.textContent = '';
+        };
+        img.onerror = () => { msg.textContent = 'ပုံ ဖတ်၍မရပါ'; msg.className = 'msg err'; };
+        img.src = reader.result;
       };
       reader.readAsDataURL(file);
     });
