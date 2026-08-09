@@ -1305,7 +1305,16 @@ async function sendBroadcastToOne(env, chatId, text, photoBytes) {
 // (WAV) များကို ပြန်ပေါင်းစည်းပြီး တစ်ဆက်တည်း file တစ်ခုအဖြစ် ပြန်ထုတ်ပေးပါသည်။
 // ===========================================================================
 
-const TTS_CHUNK_MAX_CHARS = 400; // request တစ်ခုချင်းစီအတွက် "safe" စာလုံးအရေအတွက်
+// *** fix ***: 400 char/chunk ဟာ VOXCPM_MAX_LEN မပါခင်က truncation bug ကို ကာကွယ်ဖို့
+// လိုအပ်ခဲ့တဲ့ တန်ဖိုးဖြစ်ပြီး၊ handler ဘက်မှာ VOXCPM_MAX_LEN=4096 token ကို generate()
+// ကို တိုက်ရိုက်ပို့ပေးနေပြီဖြစ်လို့ ဒီ truncation ပြသနာ မရှိတော့ပါ။ 400 char ကို ဆက်သုံးနေရင်
+// စာသားရှည်တာနဲ့ (ဥပမာ 5000+ char) RunPod job ၁၀ခုကျော် တစ်ပြိုင်နက် ဖန်တီးရလို့ (Promise.all
+// parallel fetch ဖြစ်ပါတယ်ရင်တောင်) subrequest အရေအတွက်၊ status-poll overhead၊ audio-merge
+// overhead တွေ များလွန်းသွားပြီး Cloudflare Worker ရဲ့ resource limit ကို ထိပြီး JSON အစား
+// HTML error page (Unexpected token '<') ပြန်လာတတ်ပါတယ် — chunk ကို ပိုကြီးအောင်ပြောင်းလိုက်ရင်
+// job အရေအတွက် သိသိသာသာ လျော့သွားမှာဖြစ်လို့ ဒီ error ဖြစ်နိုင်ခြေ ကျဆင်းသွားပါမည်။
+// (RunPod handler ရဲ့ MAX_CHARS default က 2000 ဖြစ်လို့ အဲ့ဒီ့ အောက်မှာ margin ချန်ထားပါတယ်)
+const TTS_CHUNK_MAX_CHARS = 1800; // request တစ်ခုချင်းစီအတွက် "safe" စာလုံးအရေအတွက်
 const MULTI_JOB_PREFIX = 'multi:'; // compound jobId (RunPod job id များကို ',' ဖြင့်ချိတ်ထား) ဖော်ပြသည့် prefix
 
 // Multi-voice tag ("M:"/"F:"/"C:") continuity ကို ထိန်းသိမ်းလျက် text ကို line boundary
@@ -1644,14 +1653,24 @@ async function handleGenerateStart(request, env, corsHeaders) {
       }
       if (voiceType) input.voice_type = voiceType;
 
-      const runRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/run`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${env.RUNPOD_API_KEY}`,
-        },
-        body: JSON.stringify({ input }),
-      });
+      // *** fix ***: fetch() ကိုယ်တိုင် network error (DNS/connection glitch) ကြောင့် throw
+      // လုပ်ခဲ့ရင် ဒီ map() ထဲမှာ try/catch မရှိရင် Promise.all တစ်ခုလုံး reject ဖြစ်သွားပြီး
+      // handleGenerateStart ကို ထပ်ဆင့် error throw ဖြစ်စေနိုင်ပါတယ် — outer try/catch (fetch
+      // handler အဆင့်) က ဖမ်းပြီး JSON error ပြန်ပေးမှာဖြစ်ပေမယ့်၊ ဒီနေရာမှာတင် တိုက်ရိုက်ဖမ်းလိုက်ရင်
+      // ပိုသေချာပြီး ဘယ် chunk ကြောင့်ဖြစ်တယ်ဆိုတာလည်း ရှင်းရှင်းလင်းလင်း error message ပြန်ပေးနိုင်ပါတယ်
+      let runRes;
+      try {
+        runRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/run`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${env.RUNPOD_API_KEY}`,
+          },
+          body: JSON.stringify({ input }),
+        });
+      } catch (e) {
+        return { error: 'RunPod ကို ဆက်သွယ်ရာတွင် network error ဖြစ်ပါသည် — ခဏနေမှ ထပ်ကြိုးစားပါ' };
+      }
 
       const parsed = await safeJsonParse(runRes);
       if (!parsed.ok) {
