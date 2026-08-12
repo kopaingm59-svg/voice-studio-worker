@@ -81,6 +81,9 @@ export default {
       if (url.pathname === '/api/purchase/submit' && request.method === 'POST') {
         return await handlePurchaseSubmit(request, env, corsHeaders);
       }
+      if (url.pathname === '/api/payg/topup/submit' && request.method === 'POST') {
+        return await handlePaygTopupSubmit(request, env, corsHeaders);
+      }
       if (url.pathname === '/api/generate/save-audio' && request.method === 'POST') {
         return await handleSaveAudio(request, env, corsHeaders);
       }
@@ -514,6 +517,61 @@ async function ensureAdminAttemptsTable(env) {
   ).run();
 }
 
+// ---- Billing: Plan credit expiry + Pay-As-You-Go wallet (lazy migration) ---
+// အောက်ပါ column အသစ်တွေကို (plans.duration_days, users.credits_expire_at,
+// users.payg_credits, purchases.is_payg, purchases.duration_days) D1 (SQLite)
+// ရဲ့ existing table တွေပေါ်ကို runtime မှာ ALTER TABLE နဲ့ ထပ်ဖြည့်ပေးပါသည် —
+// column ရှိပြီးသားဖြစ်ရင် error ကို ignore လုပ်ပါမည် (idempotent)။ process module-level
+// isolate တစ်ခုအတွင်း တစ်ကြိမ်သာ run ဖို့ flag ထားပြီး request တိုင်း ALTER ထပ်မခေါ်စေရန် လုပ်ထားသည်
+let _billingColumnsEnsured = false;
+async function ensureBillingColumns(env) {
+  if (_billingColumnsEnsured) return;
+  const alters = [
+    `ALTER TABLE plans ADD COLUMN duration_days INTEGER DEFAULT 30`,
+    `ALTER TABLE users ADD COLUMN credits_expire_at TEXT`,
+    `ALTER TABLE users ADD COLUMN payg_credits INTEGER DEFAULT 0`,
+    `ALTER TABLE purchases ADD COLUMN is_payg INTEGER DEFAULT 0`,
+    `ALTER TABLE purchases ADD COLUMN duration_days INTEGER`,
+  ];
+  for (const sql of alters) {
+    try {
+      await env.DB.prepare(sql).run();
+    } catch (e) {
+      // "duplicate column name" — column ရှိပြီးသားဖြစ်လို့ ignore လုပ်ပါမည်
+    }
+  }
+  _billingColumnsEnsured = true;
+}
+
+// SQLite ရဲ့ datetime('now', ...) format (e.g. "2026-09-11 10:00:00") ဟာ 'T'/'Z' မပါလို့
+// Date.parse() ကို တိုက်ရိုက်ပေးလိုက်ရင် timezone-less ဖြစ်ပြီး incorrect ဖြစ်တတ်ပါသည် —
+// codebase အနှံ့မှာ ရှိပြီးသား convention (created_at + 'Z') အတိုင်း UTC အဖြစ် ယူဆပါသည်
+function isPastSqliteDatetime(sqliteDatetimeStr) {
+  if (!sqliteDatetimeStr) return false;
+  const ms = Date.parse(sqliteDatetimeStr + 'Z');
+  return !isNaN(ms) && Date.now() > ms;
+}
+
+// Admin ရောင်းတဲ့ Plan ကနေ ရလာတဲ့ credits (users.credits) ဟာ credits_expire_at
+// သတ်မှတ်ထားပြီး (Plan ရဲ့ duration_days အလိုက်၊ default ၃၀ ရက်) သက်တမ်းကုန်သွားနိုင်ပါသည်
+// — Pay-As-You-Go wallet (users.payg_credits) ကတော့ ဒီ expiry နဲ့ လုံးဝ မသက်ဆိုင်ပါ။
+// သက်တမ်းကုန်နေရင် ဒီနေရာမှာ credits ကို 0 အဖြစ် ချက်ချင်း lazy-reset လုပ်ပေးပါသည်
+async function getEffectivePlanCredits(env, userId) {
+  await ensureBillingColumns(env);
+  const row = await env.DB.prepare('SELECT credits, credits_expire_at FROM users WHERE id = ?1')
+    .bind(String(userId))
+    .first();
+  if (!row) return 0;
+  const credits = Number(row.credits || 0);
+  if (credits > 0 && isPastSqliteDatetime(row.credits_expire_at)) {
+    await env.DB.prepare(`UPDATE users SET credits = 0, updated_at = datetime('now') WHERE id = ?1`)
+      .bind(String(userId))
+      .run();
+    return 0;
+  }
+  return credits;
+}
+
 async function isAdminLoginLocked(env, ip) {
   try {
     await ensureAdminAttemptsTable(env);
@@ -831,11 +889,17 @@ async function handleVoicePresetsList(request, env, corsHeaders) {
 // ---- Plans: Public ---------------------------------------------------------
 
 async function handlePlansList(request, env, corsHeaders) {
+  await ensureBillingColumns(env);
   const { results } = await env.DB.prepare(
-    'SELECT id, name, price, price_th, credits, bonus_credits, description FROM plans WHERE is_active = 1 ORDER BY credits ASC'
+    'SELECT id, name, price, price_th, credits, bonus_credits, description, duration_days FROM plans WHERE is_active = 1 ORDER BY credits ASC'
   ).all();
 
-  return json({ success: true, plans: results }, 200, corsHeaders);
+  // Pay-As-You-Go top-up (Developer API) အတွက် Admin သတ်မှတ်ထားတဲ့ minimum amount + credit rate
+  // ကို purchase page က ဒီတစ်ခေါ်ထဲမှာပဲ ရအောင် ထည့်ပေးလိုက်ပါသည် (round-trip တစ်ခု ချွေတာနိုင်ရန်)
+  const minTopupAmount = Number(await getSetting(env, 'min_topup_amount', '1000')) || 0;
+  const paygCreditRate = Number(await getSetting(env, 'payg_credit_rate', '1')) || 1;
+
+  return json({ success: true, plans: results, minTopupAmount, paygCreditRate }, 200, corsHeaders);
 }
 
 async function handlePaymentMethodsList(request, env, corsHeaders) {
@@ -859,6 +923,7 @@ async function handleAdminPlansList(request, env, corsHeaders) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
+  await ensureBillingColumns(env);
   const { results } = await env.DB.prepare('SELECT * FROM plans ORDER BY id ASC').all();
   return json({ success: true, plans: results }, 200, corsHeaders);
 }
@@ -869,16 +934,25 @@ async function handleAdminPlanCreate(request, env, corsHeaders) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
-  const { name, price, priceTh, credits, bonusCredits, description } = body;
+  const { name, price, priceTh, credits, bonusCredits, description, durationDays } = body;
   if (!name || !credits) {
     return json({ error: 'Plan name and credits လိုအပ်ပါသည်' }, 400, corsHeaders);
   }
 
+  await ensureBillingColumns(env);
   await env.DB.prepare(
-    `INSERT INTO plans (name, price, price_th, credits, bonus_credits, description, is_active, updated_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, datetime('now'))`
+    `INSERT INTO plans (name, price, price_th, credits, bonus_credits, description, duration_days, is_active, updated_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, datetime('now'))`
   )
-    .bind(name, price || '', priceTh || '', Number(credits), Number(bonusCredits) || 0, description || '')
+    .bind(
+      name,
+      price || '',
+      priceTh || '',
+      Number(credits),
+      Number(bonusCredits) || 0,
+      description || '',
+      Number(durationDays) > 0 ? Number(durationDays) : 30
+    )
     .run();
 
   return json({ success: true }, 200, corsHeaders);
@@ -890,11 +964,12 @@ async function handleAdminPlanUpdate(request, env, corsHeaders) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
-  const { id, name, price, priceTh, credits, bonusCredits, description, is_active } = body;
+  const { id, name, price, priceTh, credits, bonusCredits, description, is_active, durationDays } = body;
   if (!id) {
     return json({ error: 'Missing plan id' }, 400, corsHeaders);
   }
 
+  await ensureBillingColumns(env);
   await env.DB.prepare(
     `UPDATE plans SET
        name = COALESCE(?2, name),
@@ -904,6 +979,7 @@ async function handleAdminPlanUpdate(request, env, corsHeaders) {
        bonus_credits = COALESCE(?6, bonus_credits),
        description = COALESCE(?7, description),
        is_active = COALESCE(?8, is_active),
+       duration_days = COALESCE(?9, duration_days),
        updated_at = datetime('now')
      WHERE id = ?1`
   )
@@ -915,7 +991,8 @@ async function handleAdminPlanUpdate(request, env, corsHeaders) {
       credits !== undefined ? Number(credits) : null,
       bonusCredits !== undefined ? Number(bonusCredits) : null,
       description ?? null,
-      is_active !== undefined ? (is_active ? 1 : 0) : null
+      is_active !== undefined ? (is_active ? 1 : 0) : null,
+      durationDays !== undefined ? Number(durationDays) : null
     )
     .run();
 
@@ -948,12 +1025,16 @@ async function handleAdminSettingsGet(request, env, corsHeaders) {
   const signupBonus = await getSetting(env, 'signup_bonus', '0');
   const referralBonusReferrer = await getSetting(env, 'referral_bonus_referrer', '0');
   const referralBonusReferred = await getSetting(env, 'referral_bonus_referred', '0');
+  const minTopupAmount = await getSetting(env, 'min_topup_amount', '1000');
+  const paygCreditRate = await getSetting(env, 'payg_credit_rate', '1');
   return json(
     {
       success: true,
       signupBonus: parseInt(signupBonus, 10) || 0,
       referralBonusReferrer: parseInt(referralBonusReferrer, 10) || 0,
       referralBonusReferred: parseInt(referralBonusReferred, 10) || 0,
+      minTopupAmount: parseInt(minTopupAmount, 10) || 0,
+      paygCreditRate: parseFloat(paygCreditRate) || 1,
     },
     200,
     corsHeaders
@@ -974,6 +1055,12 @@ async function handleAdminSettingsUpdate(request, env, corsHeaders) {
   }
   if (body.referralBonusReferred !== undefined) {
     await setSetting(env, 'referral_bonus_referred', String(parseInt(body.referralBonusReferred, 10) || 0));
+  }
+  if (body.minTopupAmount !== undefined) {
+    await setSetting(env, 'min_topup_amount', String(parseInt(body.minTopupAmount, 10) || 0));
+  }
+  if (body.paygCreditRate !== undefined) {
+    await setSetting(env, 'payg_credit_rate', String(parseFloat(body.paygCreditRate) || 1));
   }
 
   return json({ success: true }, 200, corsHeaders);
@@ -1109,11 +1196,12 @@ async function handlePurchaseSubmit(request, env, corsHeaders) {
     return json({ error: 'Plan not found' }, 404, corsHeaders);
   }
 
+  await ensureBillingColumns(env);
   await env.DB.prepare(
-    `INSERT INTO purchases (user_id, plan_id, plan_name, credits, price, slip_image, status, updated_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', datetime('now'))`
+    `INSERT INTO purchases (user_id, plan_id, plan_name, credits, price, slip_image, status, duration_days, is_payg, updated_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, 0, datetime('now'))`
   )
-    .bind(String(userId), plan.id, plan.name, plan.credits, plan.price, slipImageBase64)
+    .bind(String(userId), plan.id, plan.name, plan.credits, plan.price, slipImageBase64, Number(plan.duration_days) > 0 ? Number(plan.duration_days) : 30)
     .run();
 
   // User က Plan ဝယ်တဲ့အချိန် Admin ကို Telegram ဖြင့် အသိပေးမည် (fail ဖြစ်လည်း purchase flow ကို
@@ -1131,6 +1219,74 @@ async function handlePurchaseSubmit(request, env, corsHeaders) {
       `Plan: ${plan.name}\n` +
       `Credits: ${plan.credits}\n` +
       `Price: ${plan.price}\n\n` +
+      `Admin panel ကနေ Approve/Reject လုပ်ပေးပါ။`
+  );
+
+  return json({ success: true }, 200, corsHeaders);
+}
+
+// ---- Pay-As-You-Go Top-up (Developer API users): custom amount, no fixed Plan ----
+// Plan ဝယ်ယူမှုနဲ့ မတူဘဲ user ကိုယ်တိုင် amount ရွေးထည့်ပြီး top-up လုပ်ပါသည် — ဒီနေရာမှ
+// ရလာတဲ့ credits ဟာ users.payg_credits (Developer API call တွေအတွက်သာ) ထဲ ဝင်ပြီး
+// သက်တမ်း (expiry) မရှိပါ (Plan credits (users.credits) နဲ့ ခွဲထားပါသည်)
+async function handlePaygTopupSubmit(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { initData, amount, slipImageBase64 } = body;
+
+  const userId = await getVerifiedTelegramUserId(initData, env);
+  if (!userId) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+
+  const amountNum = Number(amount);
+  if (!amountNum || amountNum <= 0 || !slipImageBase64) {
+    return json({ error: 'Amount, slip image လိုအပ်ပါသည်' }, 400, corsHeaders);
+  }
+
+  await ensureBillingColumns(env);
+  const minAmount = Number(await getSetting(env, 'min_topup_amount', '1000')) || 0;
+  if (amountNum < minAmount) {
+    return json({ error: `အနည်းဆုံး top-up ပမာဏ ${minAmount} ဖြစ်ပါသည်` }, 400, corsHeaders);
+  }
+
+  if (slipImageBase64.length > 1_400_000) {
+    return json(
+      { error: 'Slip image ဖိုင် size သိပ်ကြီးလွန်းပါသည် — ပုံ ပိုသေးအောင် (screenshot/compress) ပြန်ရိုက်ပြီး ထပ်တင်ပေးပါ' },
+      413,
+      corsHeaders
+    );
+  }
+  const rawSlipBase64 = slipImageBase64.includes(',') ? slipImageBase64.split(',')[1] : slipImageBase64;
+  const slipBytes = safeDecodeBase64(rawSlipBase64, 1_400_000);
+  if (!slipBytes) {
+    return json({ error: 'Slip image သိပ်ကြီးလွန်း (သို့) ပျက်နေပါသည်' }, 413, corsHeaders);
+  }
+  if (!looksLikeImage(slipBytes)) {
+    return json({ error: 'Slip image format မှားနေပါသည် (JPEG/PNG/WEBP ဖြစ်ရပါမည်)' }, 400, corsHeaders);
+  }
+
+  const rate = Number(await getSetting(env, 'payg_credit_rate', '1')) || 1;
+  const credits = Math.floor(amountNum * rate);
+
+  await env.DB.prepare(
+    `INSERT INTO purchases (user_id, plan_id, plan_name, credits, price, slip_image, status, is_payg, updated_at)
+     VALUES (?1, NULL, 'Pay As You Go Top-up', ?2, ?3, ?4, 'pending', 1, datetime('now'))`
+  )
+    .bind(String(userId), credits, String(amountNum), slipImageBase64)
+    .run();
+
+  const buyerRow = await env.DB.prepare('SELECT name, username FROM users WHERE id = ?1')
+    .bind(String(userId))
+    .first();
+  const buyerLabel = buyerRow
+    ? (buyerRow.username ? `${escapeTelegramHtml(buyerRow.name) || 'User'} (@${escapeTelegramHtml(buyerRow.username)})` : (escapeTelegramHtml(buyerRow.name) || 'User'))
+    : 'User';
+  await notifyAdminTelegram(
+    env,
+    `💳 <b>Pay As You Go Top-up အသစ်</b>\n` +
+      `User: ${buyerLabel} (ID: ${userId})\n` +
+      `Amount: ${amountNum}\n` +
+      `Credits: ${credits}\n\n` +
       `Admin panel ကနေ Approve/Reject လုပ်ပေးပါ။`
   );
 
@@ -1175,11 +1331,24 @@ async function handleAdminPurchaseReview(request, env, corsHeaders) {
   }
 
   if (approve) {
-    await env.DB.prepare(
-      `UPDATE users SET credits = COALESCE(credits, 0) + ?1, updated_at = datetime('now') WHERE id = ?2`
-    )
-      .bind(purchase.credits, purchase.user_id)
-      .run();
+    await ensureBillingColumns(env);
+    if (purchase.is_payg) {
+      // Pay-As-You-Go wallet ထဲ ဖြည့်ပါသည် — သက်တမ်း (expiry) မရှိပါ
+      await env.DB.prepare(
+        `UPDATE users SET payg_credits = COALESCE(payg_credits, 0) + ?1, updated_at = datetime('now') WHERE id = ?2`
+      )
+        .bind(purchase.credits, purchase.user_id)
+        .run();
+    } else {
+      // Plan credits — ဝယ်ယူချိန်က snapshot လုပ်ထားတဲ့ duration_days (default ၃၀ ရက်)
+      // အလိုက် credits_expire_at ကို (ယခု ဝယ်ယူမှုနောက်ပိုင်းအတွက်) အသစ်ပြန်သတ်မှတ်ပေးမည်
+      const days = Number(purchase.duration_days) > 0 ? Number(purchase.duration_days) : 30;
+      await env.DB.prepare(
+        `UPDATE users SET credits = COALESCE(credits, 0) + ?1, credits_expire_at = datetime('now', ?2), updated_at = datetime('now') WHERE id = ?3`
+      )
+        .bind(purchase.credits, `+${days} days`, purchase.user_id)
+        .run();
+    }
     await env.DB.prepare(
       `UPDATE purchases SET status = 'approved', updated_at = datetime('now') WHERE id = ?1`
     )
@@ -1307,6 +1476,14 @@ async function sendBroadcastToOne(env, chatId, text, photoBytes) {
 
 const TTS_CHUNK_MAX_CHARS = 400; // request တစ်ခုချင်းစီအတွက် "safe" စာလုံးအရေအတွက်
 const MULTI_JOB_PREFIX = 'multi:'; // compound jobId (RunPod job id များကို ',' ဖြင့်ချိတ်ထား) ဖော်ပြသည့် prefix
+
+// ---- Pay-As-You-Go (Developer API / api/v1) time-based billing --------------
+// Generate request စတင်တဲ့အချိန် (server ဘက် timestamp) ကနေ Output Audio ရရှိတဲ့
+// အချိန် (COMPLETED ဖြစ်ကြောင်း server က confirm လုပ်တဲ့ချိန်) ထိကြာချိန်ကို
+// (client ဘက်ကို လုံးဝ မယုံဘဲ) request_logs.created_at ကို authoritative "start" time
+// အဖြစ်ယူပြီး server ဘက်ကနေသာ တွက်ချက်ပါသည်။
+const PAYG_RATE_PER_SECOND = 5; // 1 စက္ကန့် = ၅ကျပ် (= ၅ credits, users.payg_credits ထဲကနေ နုတ်ယူမည်)
+const PAYG_MAX_BILLABLE_SECONDS = 600; // RunPod job တစ်ခု ကျောရှည်/ရပ်တန့်နေခဲ့လျှင်တောင် အများဆုံး ၁၀ မိနစ်စာသာ ကောက်ခံမည် (runaway cost ကာကွယ်ရန်)
 
 // Multi-voice tag ("M:"/"F:"/"C:") continuity ကို ထိန်းသိမ်းလျက် text ကို line boundary
 // အတိုင်းသာ (line တစ်ကြောင်းကို မလျှင်းအောင်) TTS_CHUNK_MAX_CHARS အောက် chunk များအဖြစ်
@@ -1597,10 +1774,9 @@ async function handleGenerateStart(request, env, corsHeaders) {
 
   const cost = text.trim().length;
 
-  const userRow = await env.DB.prepare('SELECT credits FROM users WHERE id = ?1')
-    .bind(userId)
-    .first();
-  const currentCredits = userRow ? Number(userRow.credits || 0) : 0;
+  // Plan ဝယ်ယူထားတဲ့ credits ဟာ သက်တမ်း (default ၃၀ ရက်) ရှိလို့ — သက်တမ်းကုန်နေရင်
+  // 0 အဖြစ် ယူဆမည် (getEffectivePlanCredits ထဲမှာ lazy-reset ပါလုပ်ပေးသည်)
+  const currentCredits = await getEffectivePlanCredits(env, userId);
 
   if (currentCredits < cost) {
     return json(
@@ -1628,6 +1804,14 @@ async function handleGenerateStart(request, env, corsHeaders) {
   // (chunk တစ်ခုတည်းရှိရင် ယခင်အတိုင်း job တစ်ခုတည်းသာ ဖြစ်မည်)
   const textChunks = splitTextForTts(text.trim(), TTS_CHUNK_MAX_CHARS, voiceType);
 
+  // Reference audio မပါတဲ့ Text-To-Speech (voice_type ချည်းသုံးတဲ့) mode မှာ VoxCPM2
+  // ဟာ model.generate() ကို independent ခေါ်တိုင်း voice ကို random ပြန်ရွေးတတ်ပါသည်
+  // — chunk အများကြီးကို parallel RunPod job အသီးသီးအဖြစ် ခွဲပို့ထားလို့ chunk တစ်ခုနဲ့
+  // တစ်ခု voice မတူဘဲ ရောနေတတ်ခဲ့ပါသည်။ ဒါကို ကာကွယ်ရန် request တစ်ခုလုံးအတွက် seed
+  // တစ်ခုတည်းကို ဖန်တီးပြီး chunk အားလုံးကို မျှဝေပေးလိုက်ပါသည် (handler.py ဘက်ကလည်း
+  // 'seed' input ကို လက်ခံပြီး reseed လုပ်ပေးအောင် ပြင်ဆင်ထားရပါမည်)
+  const ttsSeed = Math.floor(Math.random() * 2147483647);
+
   // *** fix ***: chunk အားလုံးကို sequential (တစ်ခုပြီးမှ တစ်ခု) fetch မလုပ်တော့ဘဲ Promise.all
   // နဲ့ တစ်ပြိုင်နက် ပို့လိုက်ပါတယ် — sequential ဆိုရင် chunk 14-15 ခုအတွက် RunPod ကို ဆက်တိုက်
   // ခေါ်ရင်း (round-trip time အများကြီး ပေါင်းသွားပြီး) Cloudflare Worker ရဲ့ request time limit
@@ -1637,7 +1821,7 @@ async function handleGenerateStart(request, env, corsHeaders) {
   // အရေအတွက်ပေါ် မမူတည်တော့ဘဲ တစ်ခုတည်းရဲ့ ကြာချိန်ခန့်ပဲ ကြာမည်ဖြစ်လို့ timeout ဖြစ်ခွင့် အများကြီးလျော့သွားပါမည်
   const chunkResults = await Promise.all(
     textChunks.map(async (chunkText) => {
-      const input = { text: chunkText };
+      const input = { text: chunkText, seed: ttsSeed };
       if (finalRefAudio) {
         input.reference_audio_base64 = finalRefAudio;
         if (finalPromptText && finalPromptText.trim()) input.prompt_text = finalPromptText.trim();
@@ -1810,8 +1994,9 @@ async function handleProfileGet(request, env, corsHeaders) {
     return json({ error: 'Unauthorized' }, 401, corsHeaders);
   }
 
+  await ensureBillingColumns(env);
   const user = await env.DB.prepare(
-    'SELECT id, name, username, credits, referral_code, api_key_prefix, api_key_created_at FROM users WHERE id = ?1'
+    'SELECT id, name, username, credits, credits_expire_at, payg_credits, referral_code, api_key_prefix, api_key_created_at FROM users WHERE id = ?1'
   )
     .bind(String(userId))
     .first();
@@ -1840,6 +2025,9 @@ async function handleProfileGet(request, env, corsHeaders) {
   const botUsername = env.TELEGRAM_BOT_USERNAME || TELEGRAM_BOT_USERNAME;
   const referralLink = user.referral_code ? `https://t.me/${botUsername}?startapp=${user.referral_code}` : null;
 
+  // Plan credits ဟာ သက်တမ်း (expiry) ရှိလို့ ကုန်နေရင် ဒီနေရာမှာ 0 အဖြစ် ပြန်ပေးမည်
+  const effectiveCredits = await getEffectivePlanCredits(env, userId);
+
   return json(
     {
       success: true,
@@ -1847,7 +2035,9 @@ async function handleProfileGet(request, env, corsHeaders) {
         id: user.id,
         name: user.name,
         username: user.username,
-        credits: user.credits,
+        credits: effectiveCredits,
+        creditsExpireAt: user.credits_expire_at,
+        paygCredits: Number(user.payg_credits || 0),
         referralCode: user.referral_code,
         referralLink,
         referredCount: referralStats ? referralStats.count : 0,
@@ -1963,7 +2153,8 @@ async function handleApiV1Generate(request, env, corsHeaders) {
   }
 
   const hash = await sha256Hex(apiKey);
-  const user = await env.DB.prepare('SELECT id, credits, is_banned FROM users WHERE api_key_hash = ?1')
+  await ensureBillingColumns(env);
+  const user = await env.DB.prepare('SELECT id, payg_credits, is_banned FROM users WHERE api_key_hash = ?1')
     .bind(hash)
     .first();
 
@@ -1977,11 +2168,16 @@ async function handleApiV1Generate(request, env, corsHeaders) {
     return json({ error: 'Request အလွန်များနေပါသည် — ခဏစောင့်ပြီး ထပ်ကြိုးစားပါ' }, 429, corsHeaders);
   }
 
-  const cost = text.trim().length;
-  const currentCredits = Number(user.credits || 0);
-  if (currentCredits < cost) {
+  // Developer API call တွေကို Pay-As-You-Go wallet (users.payg_credits) ကနေသာ ကောက်ခံသည်
+  // — Studio/Telegram Mini App ဘက်က Plan credits (users.credits, expiry ရှိ) နဲ့ လုံးဝ သီးခြားစီပါ
+  // *** Time-based billing ***: ဒီ request ရဲ့ တကယ့် cost ကို ဒီအဆင့်မှာ ကြိုတွက်၍မရသေးပါ
+  // (Generate Button နှိပ်တဲ့ အချိန်မှ Output Audio ရသည်အထိ ကြာချိန် x PAYG_RATE_PER_SECOND
+  // ကို job အောင်မြင်ပြီးမှသာ handleApiV1GenerateStatus ထဲမှာ တွက်ချက်နုတ်ယူမည်) — ဒါကြောင့်
+  // ဒီနေရာမှာတော့ balance ဟာ အနည်းဆုံး ၁ စက္ကန့်စာ (PAYG_RATE_PER_SECOND) ရှိ/မရှိသာ စစ်ဆေးပါသည်
+  const currentCredits = Number(user.payg_credits || 0);
+  if (currentCredits < PAYG_RATE_PER_SECOND) {
     return json(
-      { error: `Credits မလုံလောက်ပါ။ လိုအပ်ချက်: ${cost}, လက်ကျန်: ${currentCredits}` },
+      { error: `Pay-As-You-Go credits မလုံလောက်ပါ။ လက်ကျန်: ${currentCredits} (Top-up လုပ်ပြီးမှ ထပ်ကြိုးစားပါ)` },
       402,
       corsHeaders
     );
@@ -2029,12 +2225,18 @@ async function handleApiV1Generate(request, env, corsHeaders) {
     return json({ error: runData.error || 'RunPod request failed' }, 500, corsHeaders);
   }
 
-  // Credits ကို job အောင်မြင်စွာ ပြီးမြောက်မှသာ နုတ်ပါမည် (handleApiV1GenerateStatus ထဲမှာ)
-
-  await logRequestStart(env, { userId: user.id, jobId: runData.id, source: 'api', textLength: cost });
+  // Credits ကို job အောင်မြင်စွာ ပြီးမြောက်မှသာ (Output Audio ရမှသာ) နုတ်ပါမည် (handleApiV1GenerateStatus
+  // ထဲမှာ) — ဒီ INSERT ရဲ့ created_at (server ဘက် timestamp) ကိုပဲ Pay-As-You-Go timer ရဲ့
+  // "Generate Button နှိပ်တဲ့ အချိန်" အဖြစ် authoritative start time သတ်မှတ်ပါသည်
+  await logRequestStart(env, { userId: user.id, jobId: runData.id, source: 'api', textLength: text.trim().length });
 
   return json(
-    { success: true, jobId: runData.id, cost, remainingCredits: currentCredits },
+    {
+      success: true,
+      jobId: runData.id,
+      billing: { mode: 'pay_as_you_go_time', ratePerSecond: PAYG_RATE_PER_SECOND, unit: 'MMK/credits per second (Output Audio ရသည်အထိ ကြာချိန်ပေါ်မူတည်၍ Status endpoint မှ တွက်ချက်နုတ်ယူမည်)' },
+      remainingCredits: currentCredits,
+    },
     200,
     corsHeaders
   );
@@ -2064,14 +2266,13 @@ async function handleApiV1GenerateStatus(request, env, corsHeaders) {
   // request_logs ထဲက authoritative value ကို သုံးပြီး စစ်ဆေးပါသည် — မဟုတ်ရင် တခြားသူ့ job ID ကို
   // ခန့်မှန်း/သိရင် အသံ output ကို ခိုးကြည့်ခြင်း၊ cost ကို လိမ်ညာနုတ်ခြင်း တို့ကို ကာကွယ်ရန်
   const logRow = await env.DB.prepare(
-    'SELECT user_id, text_length, status FROM request_logs WHERE job_id = ?1'
+    'SELECT user_id, status, created_at FROM request_logs WHERE job_id = ?1'
   )
     .bind(String(jobId))
     .first();
   if (!logRow || String(logRow.user_id) !== String(user.id)) {
     return json({ error: 'Job not found' }, 404, corsHeaders);
   }
-  const cost = Number(logRow.text_length) || 0;
 
   const statusRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/status/${jobId}`, {
     headers: { Authorization: `Bearer ${env.RUNPOD_API_KEY}` },
@@ -2081,9 +2282,22 @@ async function handleApiV1GenerateStatus(request, env, corsHeaders) {
 
   // Job အောင်မြင်စွာ ပြီးမြောက် (audio ထွက်) မှသာ credits ကို နုတ်ပါမည်
   // — status ကို ထပ်ခါထပ်ခါ poll လုပ်လည်း credits ကို တစ်ကြိမ်ထက်ပို၍ ထပ်နုတ်မဖြစ်စေရန်
-  if (data.status === 'COMPLETED' && cost && logRow.status !== 'COMPLETED') {
+  // (logRow.status !== 'COMPLETED' က double-charge ကို ကာကွယ်ပေးသည်)
+  //
+  // *** Time-based Pay-As-You-Go billing ***
+  // Cost ကို client ဘက်က ဘယ်တုန်းက Generate Button နှိပ်ခဲ့တယ်ဆိုတာကို လုံးဝ မယုံဘဲ —
+  // request_logs.created_at (job အစပြု INSERT လုပ်ချိန်၊ server ဘက် datetime('now') timestamp)
+  // ကနေ ဒီ status check လက်ရှိအချိန် (server ဘက် Date.now()) ထိ ကြာချိန်ကိုသာ authoritative
+  // "Generate Button → Output Audio" duration အဖြစ် သုံးပါသည်။ ကြာချိန်ကို PAYG_MAX_BILLABLE_SECONDS
+  // နဲ့ cap ချထားခြင်းက job တစ်ခု ကျောရှည်/ပျက်နေခဲ့လျှင်တောင် cost ထိန်းချုပ်နိုင်ရန်ဖြစ်သည်။
+  if (data.status === 'COMPLETED' && logRow.status !== 'COMPLETED') {
+    const startMs = Date.parse(String(logRow.created_at).replace(' ', 'T') + 'Z');
+    const elapsedSeconds = Number.isFinite(startMs) ? Math.max(0, (Date.now() - startMs) / 1000) : 0;
+    const billableSeconds = Math.min(Math.max(1, Math.ceil(elapsedSeconds)), PAYG_MAX_BILLABLE_SECONDS);
+    const cost = billableSeconds * PAYG_RATE_PER_SECOND;
+
     await env.DB.prepare(
-      `UPDATE users SET credits = COALESCE(credits, 0) - ?1, updated_at = datetime('now') WHERE id = ?2`
+      `UPDATE users SET payg_credits = COALESCE(payg_credits, 0) - ?1, updated_at = datetime('now') WHERE id = ?2`
     )
       .bind(cost, user.id)
       .run();
@@ -2890,10 +3104,12 @@ function getAdminDashboardHtml() {
           <td>\${p.price || '-'}</td>
           <td>\${p.price_th || '-'}</td>
           <td>\${p.credits}</td>
+          <td>\${p.duration_days || 30} days</td>
           <td>\${p.description || '-'}</td>
           <td>\${p.is_active ? 'Active' : 'Hidden'}</td>
           <td>
             <button class="btn small ghost" onclick="editPlanPrice(\${p.id}, \${JSON.stringify(p.price || '')}, \${JSON.stringify(p.price_th || '')})">Edit Price</button>
+            <button class="btn small ghost" onclick="editPlanDuration(\${p.id}, \${p.duration_days || 30})">Edit Duration</button>
             <button class="btn small ghost" onclick="toggleActive(\${p.id}, \${p.is_active ? 0 : 1})">\${p.is_active ? 'Hide' : 'Show'}</button>
             <button class="btn small danger" onclick="deletePlan(\${p.id})">Delete</button>
           </td>
@@ -2911,11 +3127,12 @@ function getAdminDashboardHtml() {
             <div class="field"><label>Price (Myanmar - MMK)</label><input id="newPlanPrice" placeholder="e.g. 5000 MMK"></div>
             <div class="field"><label>Price (Thailand - THB)</label><input id="newPlanPriceTh" placeholder="e.g. 150 THB"></div>
           </div>
+          <div class="field"><label>Credits Validity (days) — expires after purchase approval</label><input id="newPlanDuration" type="number" value="30" placeholder="30"></div>
           <div class="field"><label>Description</label><textarea id="newPlanDesc" placeholder="Optional description"></textarea></div>
           <button class="btn" onclick="createPlan()">Add Plan</button>
           <div class="msg" id="planMsg"></div>
         </div>
-        <table><thead><tr><th>Name</th><th>Price (MMK)</th><th>Price (THB)</th><th>Credits</th><th>Description</th><th>Status</th><th>Action</th></tr></thead><tbody>\${rows || ''}</tbody></table>
+        <table><thead><tr><th>Name</th><th>Price (MMK)</th><th>Price (THB)</th><th>Credits</th><th>Validity</th><th>Description</th><th>Status</th><th>Action</th></tr></thead><tbody>\${rows || ''}</tbody></table>
         \${!data.plans.length ? '<div class="empty">No plans yet — add one above.</div>' : ''}
       \`;
     }
@@ -2925,11 +3142,12 @@ function getAdminDashboardHtml() {
       const price = document.getElementById('newPlanPrice').value.trim();
       const priceTh = document.getElementById('newPlanPriceTh').value.trim();
       const credits = document.getElementById('newPlanCredits').value.trim();
+      const durationDays = document.getElementById('newPlanDuration').value.trim() || '30';
       const description = document.getElementById('newPlanDesc').value.trim();
       const msg = document.getElementById('planMsg');
       if (!name || !credits) { msg.textContent = 'Name and Credits လိုအပ်ပါသည်'; msg.className = 'msg err'; return; }
 
-      const { ok, data } = await api('/api/admin/plans/create', { name, price, priceTh, credits, description });
+      const { ok, data } = await api('/api/admin/plans/create', { name, price, priceTh, credits, durationDays, description });
       if (ok && data.success) { msg.textContent = 'Added!'; msg.className = 'msg ok'; loadPlans(); }
       else { msg.textContent = data.error || 'Failed'; msg.className = 'msg err'; }
     }
@@ -2940,6 +3158,13 @@ function getAdminDashboardHtml() {
       const priceTh = prompt('Price (Thailand - THB):', currentPriceTh || '');
       if (priceTh === null) return;
       const { ok, data } = await api('/api/admin/plans/update', { id, price, priceTh });
+      if (ok && data.success) loadPlans(); else alert(data.error || 'Failed');
+    }
+
+    async function editPlanDuration(id, currentDuration) {
+      const durationDays = prompt('Credits Validity (days):', currentDuration || 30);
+      if (durationDays === null) return;
+      const { ok, data } = await api('/api/admin/plans/update', { id, durationDays });
       if (ok && data.success) loadPlans(); else alert(data.error || 'Failed');
     }
 
@@ -3000,6 +3225,17 @@ function getAdminDashboardHtml() {
           <button class="btn" onclick="savePaymentInfo()">Save</button>
           <div class="msg" id="paymentMsg"></div>
         </div>
+        <div class="card">
+          <h3>Pay As You Go (Developer API Top-up)</h3>
+          <div class="row2">
+            <div class="field"><label>Minimum Top-up Amount</label>
+              <input id="minTopupAmount" type="number" value="\${data.minTopupAmount || 0}"></div>
+            <div class="field"><label>Credit Rate (credits per 1 unit of amount)</label>
+              <input id="paygCreditRate" type="number" step="0.01" value="\${data.paygCreditRate || 1}"></div>
+          </div>
+          <button class="btn" onclick="savePaygSettings()">Save</button>
+          <div class="msg" id="paygMsg"></div>
+        </div>
       \`;
 
       await loadPaymentMethods();
@@ -3018,6 +3254,15 @@ function getAdminDashboardHtml() {
       const referralBonusReferred = document.getElementById('referralBonusReferred').value;
       const msg = document.getElementById('referralMsg');
       const { ok, data } = await api('/api/admin/settings/update', { referralBonusReferrer, referralBonusReferred });
+      msg.textContent = ok && data.success ? 'Saved!' : (data.error || 'Failed');
+      msg.className = 'msg ' + (ok && data.success ? 'ok' : 'err');
+    }
+
+    async function savePaygSettings() {
+      const minTopupAmount = document.getElementById('minTopupAmount').value;
+      const paygCreditRate = document.getElementById('paygCreditRate').value;
+      const msg = document.getElementById('paygMsg');
+      const { ok, data } = await api('/api/admin/settings/update', { minTopupAmount, paygCreditRate });
       msg.textContent = ok && data.success ? 'Saved!' : (data.error || 'Failed');
       msg.className = 'msg ' + (ok && data.success ? 'ok' : 'err');
     }
@@ -3076,7 +3321,7 @@ function getAdminDashboardHtml() {
       }
       wrap.innerHTML = data.purchases.map(p => \`
         <div class="card">
-          <div><b>\${p.plan_name}</b> — \${p.credits} credits (\${p.price})</div>
+          <div><b>\${p.plan_name}</b>\${p.is_payg ? ' <span style="font-size:10px; background:#fff6e0; color:#a17a1c; padding:2px 7px; border-radius:8px;">PAYG</span>' : ''} — \${p.credits} credits (\${p.price})</div>
           <div style="font-size:12px;color:#888;margin:6px 0;">User ID: \${p.user_id} · \${p.created_at}</div>
           <img class="slip" src="\${p.slip_image}" alt="Payment slip">
           <div style="margin-top:12px;">
@@ -3917,6 +4162,17 @@ function getPlansHtml() {
       border-radius: 4px; font-size: 13px; letter-spacing: 0.5px; text-transform: uppercase; cursor: pointer;
     }
     .empty, .error { text-align: center; color: #999; padding: 40px 10px; }
+    .payg-card {
+      background: #fff; border-radius: 8px; padding: 18px; margin: 22px 0 14px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.05); border: 1px dashed #b5482f;
+    }
+    .payg-card h3 { margin: 0 0 4px; font-size: 15px; }
+    .payg-card .sub { font-size: 12px; color: #888; margin-bottom: 12px; }
+    .payg-card input[type=number] {
+      width: 100%; box-sizing: border-box; padding: 10px; border-radius: 6px; border: 1px solid #ddd;
+      font-size: 14px; margin-bottom: 10px;
+    }
+    .payg-card .hint { font-size: 11px; color: #999; margin-bottom: 10px; }
 
     .modal-bg {
       display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 10;
@@ -3958,6 +4214,14 @@ function getPlansHtml() {
 
   <div id="plansWrap" style="margin-top:16px;"><div class="empty">Loading…</div></div>
 
+  <div class="payg-card">
+    <h3>⚙️ Pay As You Go — Developer API Top-up</h3>
+    <div class="sub">API Key ဖြင့် ချိတ်ဆက်အသုံးပြုနေတဲ့ Developer များအတွက် — Plan ကန့်သတ်မထားဘဲ ကိုယ်ပိုင် amount ဖြင့် wallet ကို top-up လုပ်ပါ (သက်တမ်း မကုန်ပါ)။</div>
+    <input type="number" id="paygAmount" placeholder="Amount">
+    <div class="hint" id="paygHint">Loading minimum amount…</div>
+    <button class="buy" onclick="openPaygModal()">Top Up</button>
+  </div>
+
   <div class="modal-bg" id="modalBg">
     <div class="modal">
       <h3 id="modalPlanName">Plan</h3>
@@ -3986,6 +4250,9 @@ function getPlansHtml() {
     let slipBase64 = null;
     let selectedCountry = 'MM';
     let allPlans = [];
+    let paygMinAmount = 0;
+    let paygRate = 1;
+    let isPaygMode = false;
 
     function switchCountry(country) {
       selectedCountry = country;
@@ -4000,6 +4267,10 @@ function getPlansHtml() {
       try {
         const res = await fetch('/api/plans/list', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
         const data = await res.json();
+        paygMinAmount = data.minTopupAmount || 0;
+        paygRate = data.paygCreditRate || 1;
+        document.getElementById('paygHint').textContent =
+          'အနည်းဆုံး ' + paygMinAmount + ' — 1 unit = ' + paygRate + ' credits';
         if (!res.ok || !data.success || !data.plans.length) {
           wrap.innerHTML = '<div class="empty">Plans မရှိသေးပါ။</div>';
           return;
@@ -4018,7 +4289,7 @@ function getPlansHtml() {
         <div class="plan-card">
           <h3>\${p.name}</h3>
           <div class="price">\${(selectedCountry === 'TH' ? p.price_th : p.price) || '-'}</div>
-          <div class="credits">\${p.credits} credits</div>
+          <div class="credits">\${p.credits} credits · Valid \${p.duration_days || 30} days</div>
           \${p.description ? '<div class="desc">' + p.description + '</div>' : ''}
           <button class="buy" onclick='openModal(\${JSON.stringify(p)})'>Buy Now</button>
         </div>
@@ -4027,9 +4298,40 @@ function getPlansHtml() {
 
     async function openModal(plan) {
       if (!tgUser || !tgUser.id) { alert('Telegram App ကနေ ပြန်ဝင်ပေးပါ။'); return; }
+      isPaygMode = false;
       selectedPlan = plan;
       slipBase64 = null;
       document.getElementById('modalPlanName').textContent = plan.name + ' — ' + ((selectedCountry === 'TH' ? plan.price_th : plan.price) || '-');
+      document.getElementById('slipPreview').style.display = 'none';
+      document.getElementById('uploadLabel').style.display = 'block';
+      document.getElementById('purchaseMsg').textContent = '';
+      document.getElementById('modalBg').classList.add('show');
+
+      try {
+        const res = await fetch('/api/payment-methods/list', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ country: selectedCountry }) });
+        const data = await res.json();
+        const p = (data.methods && data.methods[0]) || {};
+        document.getElementById('payInfoBox').innerHTML = p.method ? \`
+          <div><span class="k">Method:</span> \${p.method}</div>
+          <div><span class="k">Account Name:</span> \${p.account_name || '-'}</div>
+          <div><span class="k">Account Number:</span> \${p.account_number || '-'}</div>
+          \${p.note ? '<div style="margin-top:6px;">' + p.note + '</div>' : ''}
+        \` : 'Payment information မထည့်ရသေးပါ — Admin ကို ဆက်သွယ်ပါ။';
+      } catch(e) {
+        document.getElementById('payInfoBox').textContent = 'Payment info ရယူ၍ မရပါ။';
+      }
+    }
+
+    async function openPaygModal() {
+      if (!tgUser || !tgUser.id) { alert('Telegram App ကနေ ပြန်ဝင်ပေးပါ။'); return; }
+      const amount = Number(document.getElementById('paygAmount').value);
+      if (!amount || amount <= 0) { alert('Amount ထည့်ပါ'); return; }
+      if (amount < paygMinAmount) { alert('အနည်းဆုံး top-up ပမာဏ ' + paygMinAmount + ' ဖြစ်ပါသည်'); return; }
+
+      isPaygMode = true;
+      selectedPlan = { amount, credits: Math.floor(amount * paygRate) };
+      slipBase64 = null;
+      document.getElementById('modalPlanName').textContent = 'Pay As You Go Top-up — ' + amount + ' (≈ ' + selectedPlan.credits + ' credits)';
       document.getElementById('slipPreview').style.display = 'none';
       document.getElementById('uploadLabel').style.display = 'block';
       document.getElementById('purchaseMsg').textContent = '';
@@ -4096,11 +4398,17 @@ function getPlansHtml() {
       if (!slipBase64) { msg.textContent = 'Payment slip ဓာတ်ပုံ တင်ပါ'; msg.className = 'msg err'; return; }
 
       try {
-        const res = await fetch('/api/purchase/submit', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ initData: currentInitData(), planId: selectedPlan.id, slipImageBase64: slipBase64 })
-        });
+        const res = isPaygMode
+          ? await fetch('/api/payg/topup/submit', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ initData: currentInitData(), amount: selectedPlan.amount, slipImageBase64: slipBase64 })
+            })
+          : await fetch('/api/purchase/submit', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ initData: currentInitData(), planId: selectedPlan.id, slipImageBase64: slipBase64 })
+            });
         const data = await res.json();
         if (res.ok && data.success) {
           msg.textContent = 'တင်ပြီးပါပြီ — Admin approve လုပ်ပေးရုံ စောင့်ပါ။';
@@ -4257,7 +4565,17 @@ function getProfileHtml() {
             <div class="stat"><div class="n">\${u.referredCount ?? 0}</div><div class="l">Referred</div></div>
             <div class="stat"><div class="n">\${u.referralCreditsEarned ?? 0}</div><div class="l">Referral Credits</div></div>
           </div>
+          \${u.creditsExpireAt ? '<div style="margin-top:10px; font-size:11.5px; color:#888;">Plan credits သက်တမ်း — ' + new Date(u.creditsExpireAt + 'Z').toLocaleDateString() + ' အထိ</div>' : ''}
           <div style="margin-top:12px; font-size:13px; color:#555;">\${escapeHtml(u.name) || ''}\${u.username ? ' · @' + escapeHtml(u.username) : ''}</div>
+        </div>
+
+        <div class="card">
+          <h3>Pay As You Go Wallet</h3>
+          <p style="font-size:12.5px; color:#666; margin-top:0;">Developer API call (api-docs) အတွက်သာ သုံးမည့် wallet — သက်တမ်း မကုန်ပါ။</p>
+          <div class="stat-row">
+            <div class="stat"><div class="n">\${u.paygCredits ?? 0}</div><div class="l">PAYG Credits</div></div>
+          </div>
+          <div style="margin-top:12px;"><a href="/plans" class="back">💳 Top Up →</a></div>
         </div>
 
         <div class="card">
@@ -4501,8 +4819,8 @@ function getApiDocsHtml() {
   <h2>Authentication</h2>
   <p>Request body ထဲမှာ <code>apiKey</code> field ပါ ထည့်ပေးပါ။ Key ကို Profile page → API Key → Generate ကနေ ရယူနိုင်ပါတယ်။ Key ကို ဒီတစ်ကြိမ်တည်းသာ ပြသမည်ဖြစ်၍ လုံခြုံစွာ သိမ်းထားပါ။</p>
 
-  <h2>Credits</h2>
-  <p>Voice တစ်ခါ Generate လုပ်တိုင်း <code>text</code> ရဲ့ character အရေအတွက်အတိုင်း credits လိုအပ်ပါသည် (လက်ကျန် စစ်ဆေးမှု ချက်ချင်းလုပ်ပါမည်)။ Credits မလုံလောက်ရင် <code>402</code> error ပြန်ပေးပါမည်။ <strong>Job အောင်မြင်စွာ ပြီးမြောက် (COMPLETED) မှသာ</strong> credits ကို အမှန်တကယ် နုတ်ယူပါသည် — Job fail/cancel ဖြစ်ရင် credits ဘာမှ မနုတ်ပါ။</p>
+  <h2>Credits — Pay As You Go</h2>
+  <p>Public API ကနေ Generate လုပ်တဲ့ credits ဟာ Studio (Telegram Mini App) ကနေသုံးတဲ့ Plan credits နဲ့ <strong>သီးခြားစီ</strong> — Profile page ရဲ့ "Pay As You Go Wallet" ကို /plans page ကနေ amount ရွေးထည့်ပြီး top-up လုပ်ထားရပါမည် (ဒီ wallet ကို သက်တမ်း မကုန်ပါ)။ Pricing ကတော့ <strong>time-based</strong> ဖြစ်ပြီး <code>/api/v1/generate</code> ကို ခေါ်လိုက်တဲ့ (Generate Button နှိပ်လိုက်တဲ့) အချိန်မှ <code>/api/v1/generate/status</code> က Output Audio ပြန်ပေးတဲ့အချိန်ထိ ကြာချိန်ကို <strong>1 စက္ကန့်လျှင် 5 credits</strong> နှုန်းနဲ့ (server ဘက် timestamp ကိုသာ သုံးပြီး) တွက်ချက်ပါသည် — client ဘက်က ပို့လိုက်တဲ့ ကြာချိန်ကို လုံးဝ မယုံပါ။ Request စတင်ဖို့ balance ထဲမှာ အနည်းဆုံး 1 စက္ကန့်စာ (5 credits) ရှိရပါမည် (မရှိရင် <code>402</code>)။ <strong>Job အောင်မြင်စွာ ပြီးမြောက် (COMPLETED) မှသာ</strong> credits ကို အမှန်တကယ် နုတ်ယူပါသည် — Job fail/cancel ဖြစ်ရင် credits ဘာမှ မနုတ်ပါ။</p>
 
   <h2>1. Generate Voice</h2>
   <span class="badge">POST</span><code>/api/v1/generate</code>
@@ -4531,10 +4849,10 @@ function getApiDocsHtml() {
   <pre>{
   "success": true,
   "jobId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-  "cost": 9,
+  "billing": { "mode": "pay_as_you_go_time", "ratePerSecond": 5 },
   "remainingCredits": 5000
 }</pre>
-  <p style="font-size:12px; color:#888;">(<code>remainingCredits</code> ဟာ ဒီအချိန်အထိ လက်ကျန် balance ဖြစ်ပြီး — <code>cost</code> ကို job ပြီးမြောက်မှသာ နုတ်ပါမည်)</p>
+  <p style="font-size:12px; color:#888;">(<code>remainingCredits</code> ဟာ ဒီအချိန်အထိ လက်ကျန် balance ဖြစ်ပြီး — တကယ့် cost ကို Generate Button နှိပ်ချိန်မှ Output Audio ရသည်အထိ ကြာချိန် x <code>ratePerSecond</code> နဲ့ job ပြီးမြောက်မှသာ တွက်ချက်နုတ်ပါမည်)</p>
 
   <h3>Error Responses</h3>
   <table>
