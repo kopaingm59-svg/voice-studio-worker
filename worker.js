@@ -1305,16 +1305,7 @@ async function sendBroadcastToOne(env, chatId, text, photoBytes) {
 // (WAV) များကို ပြန်ပေါင်းစည်းပြီး တစ်ဆက်တည်း file တစ်ခုအဖြစ် ပြန်ထုတ်ပေးပါသည်။
 // ===========================================================================
 
-// *** fix ***: 400 char/chunk ဟာ VOXCPM_MAX_LEN မပါခင်က truncation bug ကို ကာကွယ်ဖို့
-// လိုအပ်ခဲ့တဲ့ တန်ဖိုးဖြစ်ပြီး၊ handler ဘက်မှာ VOXCPM_MAX_LEN=4096 token ကို generate()
-// ကို တိုက်ရိုက်ပို့ပေးနေပြီဖြစ်လို့ ဒီ truncation ပြသနာ မရှိတော့ပါ။ 400 char ကို ဆက်သုံးနေရင်
-// စာသားရှည်တာနဲ့ (ဥပမာ 5000+ char) RunPod job ၁၀ခုကျော် တစ်ပြိုင်နက် ဖန်တီးရလို့ (Promise.all
-// parallel fetch ဖြစ်ပါတယ်ရင်တောင်) subrequest အရေအတွက်၊ status-poll overhead၊ audio-merge
-// overhead တွေ များလွန်းသွားပြီး Cloudflare Worker ရဲ့ resource limit ကို ထိပြီး JSON အစား
-// HTML error page (Unexpected token '<') ပြန်လာတတ်ပါတယ် — chunk ကို ပိုကြီးအောင်ပြောင်းလိုက်ရင်
-// job အရေအတွက် သိသိသာသာ လျော့သွားမှာဖြစ်လို့ ဒီ error ဖြစ်နိုင်ခြေ ကျဆင်းသွားပါမည်။
-// (RunPod handler ရဲ့ MAX_CHARS default က 2000 ဖြစ်လို့ အဲ့ဒီ့ အောက်မှာ margin ချန်ထားပါတယ်)
-const TTS_CHUNK_MAX_CHARS = 1800; // request တစ်ခုချင်းစီအတွက် "safe" စာလုံးအရေအတွက်
+const TTS_CHUNK_MAX_CHARS = 400; // request တစ်ခုချင်းစီအတွက် "safe" စာလုံးအရေအတွက်
 const MULTI_JOB_PREFIX = 'multi:'; // compound jobId (RunPod job id များကို ',' ဖြင့်ချိတ်ထား) ဖော်ပြသည့် prefix
 
 // Multi-voice tag ("M:"/"F:"/"C:") continuity ကို ထိန်းသိမ်းလျက် text ကို line boundary
@@ -1653,24 +1644,14 @@ async function handleGenerateStart(request, env, corsHeaders) {
       }
       if (voiceType) input.voice_type = voiceType;
 
-      // *** fix ***: fetch() ကိုယ်တိုင် network error (DNS/connection glitch) ကြောင့် throw
-      // လုပ်ခဲ့ရင် ဒီ map() ထဲမှာ try/catch မရှိရင် Promise.all တစ်ခုလုံး reject ဖြစ်သွားပြီး
-      // handleGenerateStart ကို ထပ်ဆင့် error throw ဖြစ်စေနိုင်ပါတယ် — outer try/catch (fetch
-      // handler အဆင့်) က ဖမ်းပြီး JSON error ပြန်ပေးမှာဖြစ်ပေမယ့်၊ ဒီနေရာမှာတင် တိုက်ရိုက်ဖမ်းလိုက်ရင်
-      // ပိုသေချာပြီး ဘယ် chunk ကြောင့်ဖြစ်တယ်ဆိုတာလည်း ရှင်းရှင်းလင်းလင်း error message ပြန်ပေးနိုင်ပါတယ်
-      let runRes;
-      try {
-        runRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/run`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${env.RUNPOD_API_KEY}`,
-          },
-          body: JSON.stringify({ input }),
-        });
-      } catch (e) {
-        return { error: 'RunPod ကို ဆက်သွယ်ရာတွင် network error ဖြစ်ပါသည် — ခဏနေမှ ထပ်ကြိုးစားပါ' };
-      }
+      const runRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/run`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${env.RUNPOD_API_KEY}`,
+        },
+        body: JSON.stringify({ input }),
+      });
 
       const parsed = await safeJsonParse(runRes);
       if (!parsed.ok) {
@@ -3339,6 +3320,19 @@ ${FAVICON}
   }
   select:focus{ border-color:var(--moss); box-shadow:0 0 0 4px rgba(26,122,68,0.12); }
   .voicetype{ margin-top:20px; }
+  .tabs{
+    display:flex; gap:6px; background:var(--moss-soft); border-radius:var(--radius-md);
+    padding:4px; margin-bottom:4px;
+  }
+  .tab-btn{
+    flex:1; border:none; background:none; padding:10px 14px; cursor:pointer;
+    border-radius:calc(var(--radius-md) - 4px); font-family:'IBM Plex Mono', monospace;
+    font-size:11.5px; letter-spacing:0.06em; text-transform:uppercase; color:#5f7c6c;
+    transition:background .15s ease, color .15s ease;
+  }
+  .tab-btn.active{ background:var(--moss); color:#fff; box-shadow:var(--shadow-soft); }
+  .tab-panel{ margin-top:20px; }
+  .tab-panel:first-child{ margin-top:0; }
   .charcount{ text-align:right; font-family:'IBM Plex Mono', monospace; font-size:11px; color:#a39c8c; margin-top:6px; }
   .charcount.over{ color:var(--wax); }
 
@@ -3474,40 +3468,49 @@ ${FAVICON}
           <span class="stage-hint optional">optional — add a sample to clone it</span>
         </div>
         <div class="stage-inner">
-          <div class="voicetype">
-            <label for="presetVoiceSelect">Preset voice <span class="optional">(admin ကြိုတင် upload ထားသော အသံများ)</span></label>
-            <select id="presetVoiceSelect">
-              <option value="">— Upload your own audio —</option>
-            </select>
+          <div class="tabs" id="voiceTabs">
+            <button type="button" class="tab-btn active" data-tab="tts">Text To Speech</button>
+            <button type="button" class="tab-btn" data-tab="clone">Voice Clone</button>
           </div>
 
-          <div id="uploadVoiceWrap" style="margin-top:20px;">
-            <div class="dropzone" id="dropzone">
-              <div class="glyph">♪</div>
-              <div class="text">
-                <div class="filename" id="fileNameLabel">Choose an audio file, or drop one here</div>
-                <div class="hint">WAV or MP3, a clean few seconds of one speaker works best</div>
+          <div class="tab-panel" id="tabPanelTts">
+            <div class="voicetype" id="voiceTypeWrap">
+              <label for="voiceTypeSelect">Voice type</label>
+              <select id="voiceTypeSelect">
+                <option value="female">အမျိုးသမီးအသံ (Female)</option>
+                <option value="male">အမျိုးသားအသံ (Male)</option>
+                <option value="multi">Multi Voice (Dialogue)</option>
+              </select>
+              <div id="multiVoiceHint" style="display:none; font-size:11.5px; color:#888; margin-top:6px; line-height:1.5;">
+                Line တစ်ကြောင်းချင်းစီရှေ့မှာ <b>M:</b> (အမျိုးသား) / <b>F:</b> (အမျိုးသမီး) / <b>C:</b> (ကလေး) ထည့်ပါ — ဥပမာ:<br>
+                <code>F: မင်္ဂလာပါ<br>M: ဟုတ်ကဲ့ ကူညီပေးပါမယ်<br>C: ကျွန်တော်လည်း ပါချင်တယ်</code>
               </div>
-              <button class="clear" id="clearFile" type="button" title="Remove">&times;</button>
-            </div>
-            <input type="file" id="refAudioInput" accept="audio/*">
-
-            <div class="promptline" id="promptLine" style="display:none;">
-              <label for="promptText">What the sample says <span class="optional">(improves cloning)</span></label>
-              <input type="text" id="promptText" placeholder="Transcript of the voice sample…">
             </div>
           </div>
 
-          <div class="voicetype" id="voiceTypeWrap">
-            <label for="voiceTypeSelect">Voice type</label>
-            <select id="voiceTypeSelect">
-              <option value="female">အမျိုးသမီးအသံ (Female)</option>
-              <option value="male">အမျိုးသားအသံ (Male)</option>
-              <option value="multi">Multi Voice (Dialogue)</option>
-            </select>
-            <div id="multiVoiceHint" style="display:none; font-size:11.5px; color:#888; margin-top:6px; line-height:1.5;">
-              Line တစ်ကြောင်းချင်းစီရှေ့မှာ <b>M:</b> (အမျိုးသား) / <b>F:</b> (အမျိုးသမီး) / <b>C:</b> (ကလေး) ထည့်ပါ — ဥပမာ:<br>
-              <code>F: မင်္ဂလာပါ<br>M: ဟုတ်ကဲ့ ကူညီပေးပါမယ်<br>C: ကျွန်တော်လည်း ပါချင်တယ်</code>
+          <div class="tab-panel" id="tabPanelClone" style="display:none;">
+            <div class="voicetype">
+              <label for="presetVoiceSelect">Preset voice <span class="optional">(admin ကြိုတင် upload ထားသော အသံများ)</span></label>
+              <select id="presetVoiceSelect">
+                <option value="">— Upload your own audio —</option>
+              </select>
+            </div>
+
+            <div id="uploadVoiceWrap" style="margin-top:20px;">
+              <div class="dropzone" id="dropzone">
+                <div class="glyph">♪</div>
+                <div class="text">
+                  <div class="filename" id="fileNameLabel">Choose an audio file, or drop one here</div>
+                  <div class="hint">WAV or MP3, a clean few seconds of one speaker works best</div>
+                </div>
+                <button class="clear" id="clearFile" type="button" title="Remove">&times;</button>
+              </div>
+              <input type="file" id="refAudioInput" accept="audio/*">
+
+              <div class="promptline" id="promptLine" style="display:none;">
+                <label for="promptText">What the sample says <span class="optional">(improves cloning)</span></label>
+                <input type="text" id="promptText" placeholder="Transcript of the voice sample…">
+              </div>
             </div>
           </div>
         </div>
@@ -3587,6 +3590,31 @@ ${FAVICON}
   const multiVoiceHint = $('multiVoiceHint');
   const presetVoiceSelect = $('presetVoiceSelect');
   const uploadVoiceWrap = $('uploadVoiceWrap');
+
+  const voiceTabBtns  = document.querySelectorAll('#voiceTabs .tab-btn');
+  const tabPanelTts   = $('tabPanelTts');
+  const tabPanelClone = $('tabPanelClone');
+
+  voiceTabBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (btn.classList.contains('active')) return;
+      voiceTabBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+
+      if (btn.dataset.tab === 'tts') {
+        tabPanelTts.style.display = '';
+        tabPanelClone.style.display = 'none';
+        // Text To Speech tab ကို ပြောင်းလိုက်ရင် Voice Clone ဘက်က ရွေးချယ်ထားတာတွေကို ရှင်းလင်းပါ
+        presetVoiceSelect.value = '';
+        uploadVoiceWrap.style.display = '';
+        clearFileBtn.click();
+      } else {
+        tabPanelTts.style.display = 'none';
+        tabPanelClone.style.display = '';
+      }
+      updateVoiceTypeVisibility();
+    });
+  });
 
   voiceTypeSelect.addEventListener('change', () => {
     multiVoiceHint.style.display = voiceTypeSelect.value === 'multi' ? 'block' : 'none';
