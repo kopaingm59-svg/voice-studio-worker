@@ -1485,6 +1485,14 @@ const MULTI_JOB_PREFIX = 'multi:'; // compound jobId (RunPod job id များ
 const PAYG_RATE_PER_SECOND = 5; // 1 စက္ကန့် = ၅ကျပ် (= ၅ credits, users.payg_credits ထဲကနေ နုတ်ယူမည်)
 const PAYG_MAX_BILLABLE_SECONDS = 600; // RunPod job တစ်ခု ကျောရှည်/ရပ်တန့်နေခဲ့လျှင်တောင် အများဆုံး ၁၀ မိနစ်စာသာ ကောက်ခံမည် (runaway cost ကာကွယ်ရန်)
 
+// ---- Voice Cloning Training Fee ---------------------------------------------
+// User ကိုယ်တိုင် reference audio upload လုပ်ပြီး Voice Clone လုပ်တဲ့အခါ AI Model ကို
+// အသစ် Train ရတာကြောင့် Server ဘက် GPU/ကုန်ကျစရိတ် ပိုများပါသည် — ဒါကြောင့် ဒီ Training
+// အတွက် ထပ်ဆောင်း Credit 50 ကို ကောက်ခံပါသည်။ Admin ကြိုတင် upload ထားတဲ့ Voice Preset
+// (voicePresetId) ကိုသာ ရွေးထားပါက ဒီ Training Fee မပါပါ — Preset ကို တစ်ခါတည်း Train
+// ပြီးသားဖြစ်၍ ထပ်မံ Train စရာမလိုတော့ပါ။ (Studio + Developer API v1 နှစ်ခုစလုံးမှာ သက်ရောက်သည်)
+const VOICE_CLONE_TRAIN_COST = 50;
+
 // Multi-voice tag ("M:"/"F:"/"C:") continuity ကို ထိန်းသိမ်းလျက် text ကို line boundary
 // အတိုင်းသာ (line တစ်ကြောင်းကို မလျှင်းအောင်) TTS_CHUNK_MAX_CHARS အောက် chunk များအဖြစ်
 // ပိုင်းထုတ်ပေးသည်။ line တစ်ကြောင်းတည်းက ကန့်သတ်ချက်ထက် ကျော်နေရင် sentence/space
@@ -1772,7 +1780,11 @@ async function handleGenerateStart(request, env, corsHeaders) {
     }
   }
 
-  const cost = text.trim().length;
+  // User ကိုယ်တိုင် reference audio upload လုပ်ပြီး Voice Clone လုပ်မှသာ (Admin preset
+  // မဟုတ်ပါက) Training Fee ကို ထပ်ဆောင်းကောက်ခံပါသည် — preset သုံးရင် train ပြီးသားဖြစ်၍ ကင်းလွတ်သည်
+  const isVoiceCloneTraining = !!(refAudioBase64 && !voicePresetId);
+  const trainCost = isVoiceCloneTraining ? VOICE_CLONE_TRAIN_COST : 0;
+  const cost = text.trim().length + trainCost;
 
   // Plan ဝယ်ယူထားတဲ့ credits ဟာ သက်တမ်း (default ၃၀ ရက်) ရှိလို့ — သက်တမ်းကုန်နေရင်
   // 0 အဖြစ် ယူဆမည် (getEffectivePlanCredits ထဲမှာ lazy-reset ပါလုပ်ပေးသည်)
@@ -1780,7 +1792,11 @@ async function handleGenerateStart(request, env, corsHeaders) {
 
   if (currentCredits < cost) {
     return json(
-      { error: `Credits မလုံလောက်ပါ။ လိုအပ်ချက်: ${cost}, လက်ကျန်: ${currentCredits}` },
+      {
+        error: trainCost
+          ? `Credits မလုံလောက်ပါ။ လိုအပ်ချက်: ${cost} (Text: ${cost - trainCost} + Voice Training: ${trainCost}), လက်ကျန်: ${currentCredits}`
+          : `Credits မလုံလောက်ပါ။ လိုအပ်ချက်: ${cost}, လက်ကျန်: ${currentCredits}`,
+      },
       402,
       corsHeaders
     );
@@ -1864,7 +1880,7 @@ async function handleGenerateStart(request, env, corsHeaders) {
   await logRequestStart(env, { userId, jobId, source: 'miniapp', textLength: cost });
 
   return json(
-    { success: true, jobId, cost, remainingCredits: currentCredits },
+    { success: true, jobId, cost, trainCost, voiceCloneTraining: isVoiceCloneTraining, remainingCredits: currentCredits },
     200,
     corsHeaders
   );
@@ -2174,10 +2190,22 @@ async function handleApiV1Generate(request, env, corsHeaders) {
   // (Generate Button နှိပ်တဲ့ အချိန်မှ Output Audio ရသည်အထိ ကြာချိန် x PAYG_RATE_PER_SECOND
   // ကို job အောင်မြင်ပြီးမှသာ handleApiV1GenerateStatus ထဲမှာ တွက်ချက်နုတ်ယူမည်) — ဒါကြောင့်
   // ဒီနေရာမှာတော့ balance ဟာ အနည်းဆုံး ၁ စက္ကန့်စာ (PAYG_RATE_PER_SECOND) ရှိ/မရှိသာ စစ်ဆေးပါသည်
+  // User ကိုယ်တိုင် reference audio ပို့ပြီး Voice Clone (Admin preset မဟုတ်ပါက) Train
+  // ခိုင်းတိုင်း ထပ်ဆောင်း Training Fee (VOICE_CLONE_TRAIN_COST) ကို ကောက်ခံပါသည် — ဒါကို
+  // Time-based generation cost (PAYG_RATE_PER_SECOND, status endpoint မှာ တွက်ချက်မည်) နဲ့
+  // သီးခြားစီပါ။ Training ကို job တင်တဲ့ချိန်တည်းက ဒီနေရာမှာချက်ချင်း ဆောင်ရွက်ရလို့ (job
+  // အောင်မြင်/မအောင်မြင် မဆို) Training Fee ကို ချက်ချင်း ဒီအဆင့်မှာပဲ နုတ်ယူပါသည်
+  const isVoiceCloneTraining = !!(refAudioBase64 && !voicePresetId);
+  const trainCost = isVoiceCloneTraining ? VOICE_CLONE_TRAIN_COST : 0;
+
   const currentCredits = Number(user.payg_credits || 0);
-  if (currentCredits < PAYG_RATE_PER_SECOND) {
+  if (currentCredits < PAYG_RATE_PER_SECOND + trainCost) {
     return json(
-      { error: `Pay-As-You-Go credits မလုံလောက်ပါ။ လက်ကျန်: ${currentCredits} (Top-up လုပ်ပြီးမှ ထပ်ကြိုးစားပါ)` },
+      {
+        error: trainCost
+          ? `Pay-As-You-Go credits မလုံလောက်ပါ။ Voice Training Fee: ${trainCost} + Minimum generation: ${PAYG_RATE_PER_SECOND}, လက်ကျန်: ${currentCredits} (Top-up လုပ်ပြီးမှ ထပ်ကြိုးစားပါ)`
+          : `Pay-As-You-Go credits မလုံလောက်ပါ။ လက်ကျန်: ${currentCredits} (Top-up လုပ်ပြီးမှ ထပ်ကြိုးစားပါ)`,
+      },
       402,
       corsHeaders
     );
@@ -2230,12 +2258,31 @@ async function handleApiV1Generate(request, env, corsHeaders) {
   // "Generate Button နှိပ်တဲ့ အချိန်" အဖြစ် authoritative start time သတ်မှတ်ပါသည်
   await logRequestStart(env, { userId: user.id, jobId: runData.id, source: 'api', textLength: text.trim().length });
 
+  // Voice Cloning Training Fee ကို ဒီနေရာမှာချက်ချင်းနုတ်ယူပါသည် (generation cost ကဲ့သို့
+  // job ပြီးမြောက်မှ စောင့်ရန်မလိုပါ) — Developer အနေဖြင့် remainingCredits ထဲမှာ ဒီ Fee
+  // နုတ်ပြီးသား balance ကို ချက်ချင်းမြင်နိုင်ပါသည်
+  let remainingAfterTrain = currentCredits;
+  if (trainCost > 0) {
+    await env.DB.prepare(
+      `UPDATE users SET payg_credits = COALESCE(payg_credits, 0) - ?1, updated_at = datetime('now') WHERE id = ?2`
+    )
+      .bind(trainCost, user.id)
+      .run();
+    remainingAfterTrain = currentCredits - trainCost;
+  }
+
   return json(
     {
       success: true,
       jobId: runData.id,
-      billing: { mode: 'pay_as_you_go_time', ratePerSecond: PAYG_RATE_PER_SECOND, unit: 'MMK/credits per second (Output Audio ရသည်အထိ ကြာချိန်ပေါ်မူတည်၍ Status endpoint မှ တွက်ချက်နုတ်ယူမည်)' },
-      remainingCredits: currentCredits,
+      billing: {
+        mode: 'pay_as_you_go_time',
+        ratePerSecond: PAYG_RATE_PER_SECOND,
+        unit: 'MMK/credits per second (Output Audio ရသည်အထိ ကြာချိန်ပေါ်မူတည်၍ Status endpoint မှ တွက်ချက်နုတ်ယူမည်)',
+        voiceCloneTrainingFee: trainCost,
+        voiceCloneTrainingNote: 'refAudioBase64 ဖြင့် Voice Clone Train လုပ်တိုင်း (voicePresetId မသုံးပါက) ဒီ Fee ကို ချက်ချင်းနုတ်ယူပါသည် — Preset ကို သုံးရင် Fee မပါပါ',
+      },
+      remainingCredits: remainingAfterTrain,
     },
     200,
     corsHeaders
@@ -3701,7 +3748,7 @@ ${FAVICON}
         <div class="stage-inner">
           <label for="textInput">Text to speak <span class="req">*</span></label>
           <textarea id="textInput" placeholder="Write what you want the voice to say…"></textarea>
-          <div class="charcount"><span id="charLen">0</span> characters = <span id="charCost">0</span> credits</div>
+          <div class="charcount"><span id="charLen">0</span> characters = <span id="charCost">0</span> credits<span id="trainCostNote" style="display:none; color:#b5482f;"> (includes 50 credit voice training fee)</span></div>
         </div>
       </div>
     </section>
@@ -3750,6 +3797,7 @@ ${FAVICON}
                 </div>
                 <button class="clear" id="clearFile" type="button" title="Remove">&times;</button>
               </div>
+              <div style="margin-top:8px; font-size:11.5px; color:#b5482f;">⚠️ Own audio upload ဖြင့် Voice Clone Train လုပ်ပါက Training Fee <b>Credit 50</b> ထပ်ဆောင်းကောက်ခံပါမည် (Preset voice တွေမှာတော့ ဒီ Fee မပါပါ)</div>
               <input type="file" id="refAudioInput" accept="audio/*">
 
               <div class="promptline" id="promptLine" style="display:none;">
@@ -3877,6 +3925,7 @@ ${FAVICON}
   presetVoiceSelect.addEventListener('change', () => {
     uploadVoiceWrap.style.display = presetVoiceSelect.value ? 'none' : '';
     updateVoiceTypeVisibility();
+    updateCostDisplay();
   });
 
   async function loadVoicePresets(){
@@ -3930,12 +3979,23 @@ ${FAVICON}
     }
   }
 
-  textEl.addEventListener('input', () => {
+  const VOICE_TRAIN_COST = 50; // Backend ရဲ့ VOICE_CLONE_TRAIN_COST နဲ့ တူညီအောင် ထားရပါမည်
+  const trainCostNoteEl = $('trainCostNote');
+
+  // User ကိုယ်တိုင် audio upload လုပ်ပြီး Voice Clone Train လုပ်နေချိန်မှသာ (Admin preset
+  // မဟုတ်ပါက) Training Fee ကို ထည့်တွက်ပြပေးသည် — preset ရွေးထားရင် ဒီ Fee မပါ
+  function updateCostDisplay(){
     const len = textEl.value.trim().length;
+    const isTraining = !!refAudioBase64 && !presetVoiceSelect.value;
+    const trainCost = isTraining ? VOICE_TRAIN_COST : 0;
+    const totalCost = len + trainCost;
     charLenEl.textContent = textEl.value.length;
-    charCostEl.textContent = len;
-    charCountWrap.classList.toggle('over', len > currentCredits);
-  });
+    charCostEl.textContent = totalCost;
+    trainCostNoteEl.style.display = isTraining ? 'inline' : 'none';
+    charCountWrap.classList.toggle('over', totalCost > currentCredits);
+  }
+
+  textEl.addEventListener('input', updateCostDisplay);
 
   function handleFile(file){
     if (!file) return;
@@ -3950,6 +4010,7 @@ ${FAVICON}
       dropzone.classList.add('has-file');
       promptLine.style.display = 'block';
       updateVoiceTypeVisibility();
+      updateCostDisplay();
     };
     reader.onerror = () => setStatus('Could not read that file.', 'err');
     reader.readAsDataURL(file);
@@ -3975,6 +4036,7 @@ ${FAVICON}
     promptLine.style.display = 'none';
     promptTextEl.value = '';
     updateVoiceTypeVisibility();
+    updateCostDisplay();
   });
 
   function setStatus(msg, kind){
@@ -3992,14 +4054,20 @@ ${FAVICON}
 
     const text = textEl.value.trim();
     if (!text) { setStatus('Write something for the voice to say.', 'err'); return; }
-    if (text.length > currentCredits) {
-      setStatus('Credits မလုံလောက်ပါ (လိုအပ်: ' + text.length + ', လက်ကျန်: ' + currentCredits + ')', 'err');
+    const isTraining = !!refAudioBase64 && !presetVoiceSelect.value;
+    const trainCost = isTraining ? VOICE_TRAIN_COST : 0;
+    const totalCost = text.length + trainCost;
+    if (totalCost > currentCredits) {
+      setStatus(
+        'Credits မလုံလောက်ပါ (လိုအပ်: ' + totalCost + (trainCost ? ' — Text ' + text.length + ' + Voice Training ' + trainCost : '') + ', လက်ကျန်: ' + currentCredits + ')',
+        'err'
+      );
       return;
     }
 
     output.classList.remove('show');
     setBusy(true);
-    setStatus('Sending request…');
+    setStatus(isTraining ? 'Sending request… (includes 50 credit voice training fee)' : 'Sending request…');
 
     try {
       const startRes = await fetch('/api/generate', {
@@ -4845,14 +4913,24 @@ function getApiDocsHtml() {
     <tr><td>voicePresetId</td><td>number</td><td>No</td><td>Admin ကြိုတင် upload ထားတဲ့ voice preset ID — ဒါပါလာရင် refAudioBase64 အစား ဒီ preset ရဲ့ အသံကို သုံးပါမည်</td></tr>
   </table>
 
+  <div class="notice" style="background:#fff8f6; border:1px solid #f0d8d1; border-radius:8px; padding:14px 16px; font-size:13px; color:#7a3324; margin:14px 0;">
+    <strong>⚠️ Voice Cloning Training Fee — 50 Credits</strong>
+    <p style="margin-top:6px;"><code>refAudioBase64</code> ကို ကိုယ်တိုင် ပို့ပြီး Voice Clone Train လုပ်တိုင်း (<code>voicePresetId</code> မသုံးပါက) AI Model ကို အသစ် Train ရသောကြောင့် ထပ်ဆောင်း <strong>Credit 50</strong> ကို Request တင်တဲ့ချိန်တည်းက ချက်ချင်း ကောက်ခံပါမည် (Generation ၏ time-based cost ကတော့ ယခင်အတိုင်း job ပြီးမြောက်မှသာ သီးခြားနုတ်ယူပါမည်)။ Admin ကြိုတင်တင်ထားတဲ့ <code>voicePresetId</code> ကိုသာ သုံးပါက ဒီ Training Fee မပါပါ — Preset ကို တစ်ခါတည်း Train ပြီးသားဖြစ်၍ ကင်းလွတ်ပါသည်။</p>
+  </div>
+
   <h3>Response (200)</h3>
   <pre>{
   "success": true,
   "jobId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-  "billing": { "mode": "pay_as_you_go_time", "ratePerSecond": 5 },
+  "billing": {
+    "mode": "pay_as_you_go_time",
+    "ratePerSecond": 5,
+    "voiceCloneTrainingFee": 50,
+    "voiceCloneTrainingNote": "refAudioBase64 ဖြင့် Train လုပ်တိုင်း ချက်ချင်းနုတ်ယူသည် (voicePresetId သုံးရင် 0)"
+  },
   "remainingCredits": 5000
 }</pre>
-  <p style="font-size:12px; color:#888;">(<code>remainingCredits</code> ဟာ ဒီအချိန်အထိ လက်ကျန် balance ဖြစ်ပြီး — တကယ့် cost ကို Generate Button နှိပ်ချိန်မှ Output Audio ရသည်အထိ ကြာချိန် x <code>ratePerSecond</code> နဲ့ job ပြီးမြောက်မှသာ တွက်ချက်နုတ်ပါမည်)</p>
+  <p style="font-size:12px; color:#888;">(<code>remainingCredits</code> ဟာ Voice Training Fee (ရှိလျှင်) နုတ်ပြီးသား လက်ကျန် balance ဖြစ်ပါသည် — Generation ၏ တကယ့် time-based cost ကိုတော့ Generate Button နှိပ်ချိန်မှ Output Audio ရသည်အထိ ကြာချိန် x <code>ratePerSecond</code> နဲ့ job ပြီးမြောက်မှသာ ထပ်မံတွက်ချက်နုတ်ပါမည်)</p>
 
   <h3>Error Responses</h3>
   <table>
