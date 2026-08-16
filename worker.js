@@ -3798,25 +3798,69 @@ ${FAVICON}
     <section class="stage">
       <div class="stage-body">
         <div class="stage-head">
-          <h2>Video</h2>
-          <span class="stage-hint">upload a clip to transcribe its speech</span>
+          <h2>API Access</h2>
+          <span class="stage-hint">connect your Gemini key</span>
         </div>
         <div class="stage-inner">
           <label for="geminiApiKeyInput">Gemini API key <span class="req">*</span></label>
           <input type="text" id="geminiApiKeyInput" placeholder="AIza…">
           <div class="stage-hint" style="color:#8f8879; margin-top:6px; text-transform:none; letter-spacing:0;">Key ကို ဒီ browser ပေါ်မှာသာ (local) သိမ်းထားပြီး ဒီ server ရဲ့ Database ထဲ လုံးဝမသိမ်းပါ — နောက်တစ်ခါ ပြန်လာသုံးရင် အလိုအလျောက် ပြန်ဖြည့်ပေးပါလိမ့်မယ်။</div>
+          <button class="download" id="loadModelsBtn" type="button" style="margin-top:14px;">Load Models</button>
 
-          <div style="margin-top:20px;">
-            <label>Video file <span class="req">*</span></label>
-            <div class="dropzone" id="videoDropzone">
-              <div class="glyph">▶</div>
-              <div class="text">
-                <div class="filename" id="videoFileNameLabel">Choose a video file, or drop one here</div>
-                <div class="hint">MP4, MOV, WEBM… keep it under ~20MB for best results</div>
-              </div>
-              <button class="clear" id="clearVideoFile" type="button" title="Remove">&times;</button>
+          <div id="modelSelectWrap" style="display:none; margin-top:18px;">
+            <div class="voicetype" style="margin-top:0;">
+              <label for="modelSelect">Model</label>
+              <select id="modelSelect"></select>
             </div>
-            <input type="file" id="videoInput" accept="video/*">
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="stage">
+      <div class="stage-body">
+        <div class="stage-head">
+          <h2>Media</h2>
+          <span class="stage-hint">upload a video or audio clip</span>
+        </div>
+        <div class="stage-inner">
+          <div class="dropzone" id="videoDropzone">
+            <div class="glyph">▶</div>
+            <div class="text">
+              <div class="filename" id="videoFileNameLabel">Choose a video/audio file, or drop one here</div>
+              <div class="hint">MP4, MOV, WEBM, MP3, WAV… up to 2GB</div>
+            </div>
+            <button class="clear" id="clearVideoFile" type="button" title="Remove">&times;</button>
+          </div>
+          <input type="file" id="videoInput" accept="video/*,audio/*">
+
+          <div id="langWrap" style="display:none; margin-top:22px;">
+            <div class="voicetype" style="margin-top:0;">
+              <label for="sourceLanguageSelect">Audio language</label>
+              <select id="sourceLanguageSelect">
+                <option value="auto">Auto-detect Language</option>
+                <option value="English">English</option>
+                <option value="Burmese">Burmese (မြန်မာဘာသာ)</option>
+                <option value="Thai">Thai (ไทย)</option>
+                <option value="Chinese">Chinese (中文)</option>
+                <option value="Japanese">Japanese (日本語)</option>
+                <option value="Korean">Korean (한국어)</option>
+              </select>
+            </div>
+            <div class="voicetype">
+              <label for="targetLanguageSelect">Output language</label>
+              <select id="targetLanguageSelect">
+                <option value="original">Same as Audio</option>
+                <option value="English">English</option>
+                <option value="Burmese">Burmese (မြန်မာဘာသာ)</option>
+                <option value="Thai">Thai (ไทย)</option>
+                <option value="Chinese">Chinese (中文)</option>
+                <option value="Japanese">Japanese (日本語)</option>
+                <option value="Korean">Korean (한국어)</option>
+                <option value="Spanish">Spanish (Español)</option>
+                <option value="French">French (Français)</option>
+              </select>
+            </div>
           </div>
         </div>
       </div>
@@ -3826,20 +3870,25 @@ ${FAVICON}
       <div class="stage-body">
         <div class="stage-head">
           <h2>Transcript</h2>
-          <span class="stage-hint">speech-to-text, with pause markers</span>
+          <span class="stage-hint">SRT, transcript &amp; TTS voice prompt</span>
         </div>
         <div class="stage-inner">
-          <button class="generate" id="transcribeBtn">
+          <button class="generate" id="transcribeBtn" disabled>
             <span class="spinner" id="transcribeSpinner"></span>
-            <span id="transcribeLabel">Transcribe video</span>
+            <span id="transcribeLabel">Start processing</span>
           </button>
           <div class="status" id="transcribeStatusLine"></div>
 
           <div class="output" id="transcriptOutput">
-            <div class="output-head">Transcript</div>
-            <textarea id="transcriptText" readonly style="width:100%; min-height:160px; font-family:'IBM Plex Mono', monospace; font-size:13px; background:#fff; border:1px solid var(--line); border-radius:var(--radius-md); padding:12px 14px; color:var(--ink);"></textarea>
-            <div class="output-foot">
-              <button class="download" id="copyTranscriptBtn" type="button">Copy Transcript</button>
+            <div class="tabs" id="resultTabs" style="margin-bottom:16px;">
+              <button type="button" class="tab-btn active" data-tab="srt">SRT</button>
+              <button type="button" class="tab-btn" data-tab="transcript">Transcript</button>
+              <button type="button" class="tab-btn" data-tab="prompt">TTS Prompt</button>
+            </div>
+            <textarea id="transcriptText" readonly style="width:100%; min-height:220px; font-family:'IBM Plex Mono', monospace; font-size:12.5px; background:#fff; border:1px solid var(--line); border-radius:var(--radius-md); padding:12px 14px; color:var(--ink);"></textarea>
+            <div class="output-foot" style="justify-content:space-between;">
+              <button class="download" id="copyTranscriptBtn" type="button">Copy</button>
+              <button class="download" id="downloadTranscriptBtn" type="button">Download</button>
             </div>
           </div>
         </div>
@@ -4177,16 +4226,14 @@ ${FAVICON}
 (function(){
   // ===========================================================================
   // Video Transcript (Gemini API) — self-contained, does not touch Voice Studio
+  // Logic ported from the user's own Transcript AI Studio site (model list,
+  // language selection, SRT / Transcript / TTS-prompt JSON output).
   // ===========================================================================
   const $ = id => document.getElementById(id);
-  const GEMINI_MODEL = 'gemini-2.5-flash';
   const GEMINI_KEY_STORAGE = 'kpv_gemini_api_key';
-  const GEMINI_UPLOAD_URL = 'https://generativelanguage.googleapis.com/upload/v1beta/files';
-  const GEMINI_FILES_BASE = 'https://generativelanguage.googleapis.com/v1beta/';
-  const MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024; // Gemini File API per-file limit (~2GB)
 
-  const pageTabBtns   = document.querySelectorAll('#pageTabs .tab-btn');
-  const pageStudio    = $('pageStudio');
+  const pageTabBtns    = document.querySelectorAll('#pageTabs .tab-btn');
+  const pageStudio     = $('pageStudio');
   const pageTranscript = $('pageTranscript');
 
   pageTabBtns.forEach(btn => {
@@ -4200,19 +4247,28 @@ ${FAVICON}
     });
   });
 
-  const geminiApiKeyInput = $('geminiApiKeyInput');
-  const videoDropzone      = $('videoDropzone');
-  const videoInput         = $('videoInput');
-  const videoFileNameLabel = $('videoFileNameLabel');
-  const clearVideoFileBtn  = $('clearVideoFile');
+  const geminiApiKeyInput    = $('geminiApiKeyInput');
+  const loadModelsBtn        = $('loadModelsBtn');
+  const modelSelectWrap      = $('modelSelectWrap');
+  const modelSelect          = $('modelSelect');
 
-  const transcribeBtn      = $('transcribeBtn');
-  const transcribeLabel    = $('transcribeLabel');
-  const transcribeSpinner  = $('transcribeSpinner');
+  const videoDropzone        = $('videoDropzone');
+  const videoInput           = $('videoInput');
+  const videoFileNameLabel   = $('videoFileNameLabel');
+  const clearVideoFileBtn    = $('clearVideoFile');
+  const langWrap             = $('langWrap');
+  const sourceLanguageSelect = $('sourceLanguageSelect');
+  const targetLanguageSelect = $('targetLanguageSelect');
+
+  const transcribeBtn        = $('transcribeBtn');
+  const transcribeLabel      = $('transcribeLabel');
+  const transcribeSpinner    = $('transcribeSpinner');
   const transcribeStatusLine = $('transcribeStatusLine');
-  const transcriptOutput   = $('transcriptOutput');
-  const transcriptText     = $('transcriptText');
-  const copyTranscriptBtn  = $('copyTranscriptBtn');
+  const transcriptOutput     = $('transcriptOutput');
+  const transcriptText       = $('transcriptText');
+  const resultTabBtns        = document.querySelectorAll('#resultTabs .tab-btn');
+  const copyTranscriptBtn    = $('copyTranscriptBtn');
+  const downloadTranscriptBtn = $('downloadTranscriptBtn');
 
   // Api Key ကို server/DB ကို ပို့မထားပါ — browser localStorage ထဲမှာသာ ဒီစက်ပေါ်တွင်
   // နောက်တစ်ခါပြန်သုံးလို့ရအောင် သိမ်းထားပါသည်
@@ -4225,16 +4281,25 @@ ${FAVICON}
   });
 
   let videoFile = null;
+  let generatedData = { srt: '', transcript: '', prompt: '' };
+  let currentResultTab = 'srt';
+
+  function updateStartButtonState() {
+    transcribeBtn.disabled = !(videoFile && modelSelect.value);
+  }
 
   function setVideoFile(file) {
     videoFile = file || null;
     if (videoFile) {
       videoFileNameLabel.textContent = videoFile.name;
       videoDropzone.classList.add('has-file');
+      langWrap.style.display = '';
     } else {
-      videoFileNameLabel.textContent = 'Choose a video file, or drop one here';
+      videoFileNameLabel.textContent = 'Choose a video/audio file, or drop one here';
       videoDropzone.classList.remove('has-file');
+      langWrap.style.display = 'none';
     }
+    updateStartButtonState();
   }
 
   videoDropzone.addEventListener('click', (e) => {
@@ -4265,76 +4330,131 @@ ${FAVICON}
     transcribeStatusLine.className = 'status' + (kind ? (' ' + kind) : '');
   }
 
-  // Gemini File API — resumable upload (video ကို base64 inline ပို့မယ့်အစား file အနေနဲ့
-  // upload လုပ်ပြီး file_uri ကိုသာ generateContent ကို ပို့ပါသည် — ဒီနည်းက video ကြီးကြီး/
-  // ကြာကြာတွေအတွက် ပိုအဆင်ပြေပြီး request size limit ကို ရှောင်နိုင်ပါသည်)
-  async function uploadVideoToGemini(file, apiKey, onStatus) {
-    const startResp = await fetch(GEMINI_UPLOAD_URL, {
+  loadModelsBtn.addEventListener('click', fetchModels);
+  modelSelect.addEventListener('change', updateStartButtonState);
+
+  async function fetchModels() {
+    const apiKey = (geminiApiKeyInput.value || '').trim();
+    if (!apiKey) {
+      setTranscribeStatus('Gemini API Key ထည့်ပေးပါ။', 'err');
+      geminiApiKeyInput.focus();
+      return;
+    }
+    modelSelectWrap.style.display = '';
+    modelSelect.innerHTML = '<option value="" disabled selected>Loading models…</option>';
+    try {
+      const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models?key=' + encodeURIComponent(apiKey));
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message);
+      const validModels = (data.models || []).filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.indexOf('generateContent') !== -1);
+      if (!validModels.length) throw new Error('generateContent ကို support လုပ်တဲ့ model မတွေ့ပါ။');
+      modelSelect.innerHTML = validModels.map(m => '<option value="' + m.name + '">' + (m.displayName || m.name) + '</option>').join('');
+      const flashModel = validModels.find(m => m.name.indexOf('flash') !== -1);
+      if (flashModel) modelSelect.value = flashModel.name;
+      setTranscribeStatus('Model list ရပါပြီ ✓', 'ok');
+    } catch (err) {
+      modelSelect.innerHTML = '<option value="" disabled selected>Error</option>';
+      setTranscribeStatus((err && err.message) ? err.message : 'Model list ကို ဆွဲထုတ်လို့ မရပါ။', 'err');
+    }
+    updateStartButtonState();
+  }
+
+  async function performUpload(apiKey, file, onStatus) {
+    const startRes = await fetch('https://generativelanguage.googleapis.com/upload/v1beta/files?key=' + encodeURIComponent(apiKey), {
       method: 'POST',
       headers: {
-        'x-goog-api-key': apiKey,
         'X-Goog-Upload-Protocol': 'resumable',
         'X-Goog-Upload-Command': 'start',
         'X-Goog-Upload-Header-Content-Length': String(file.size),
-        'X-Goog-Upload-Header-Content-Type': file.type || 'video/mp4',
+        'X-Goog-Upload-Header-Content-Type': file.type || 'application/octet-stream',
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ file: { display_name: file.name || 'video' } })
+      body: JSON.stringify({ file: { display_name: 'media_' + Date.now() } })
     });
-    if (!startResp.ok) {
-      let msg = 'Gemini upload session ကို စတင်လို့ မရပါ (HTTP ' + startResp.status + ')';
-      try { const errData = await startResp.json(); if (errData && errData.error && errData.error.message) msg = errData.error.message; } catch(e) {}
+    if (!startRes.ok) {
+      let msg = 'Upload session ကို စတင်လို့ မရပါ (HTTP ' + startRes.status + ')';
+      try { const errData = await startRes.json(); if (errData && errData.error && errData.error.message) msg = errData.error.message; } catch(e) {}
       throw new Error(msg);
     }
-    const uploadUrl = startResp.headers.get('x-goog-upload-url');
-    if (!uploadUrl) {
-      throw new Error('Gemini upload URL မရပါ — API Key ကို ပြန်စစ်ပေးပါ။');
-    }
+    const uploadUrl = startRes.headers.get('X-Goog-Upload-URL');
+    if (!uploadUrl) throw new Error('Upload URL မရပါ — API Key ကို ပြန်စစ်ပေးပါ။');
 
-    if (onStatus) onStatus('Video ကို Gemini ဆီ upload လုပ်နေပါသည်…');
+    if (onStatus) onStatus('Media ကို upload လုပ်နေပါသည်…');
 
-    const uploadResp = await fetch(uploadUrl, {
+    const uploadRes = await fetch(uploadUrl, {
       method: 'POST',
       headers: {
-        'Content-Length': String(file.size),
+        'X-Goog-Upload-Command': 'upload, finalize',
         'X-Goog-Upload-Offset': '0',
-        'X-Goog-Upload-Command': 'upload, finalize'
+        'Content-Length': String(file.size)
       },
       body: file
     });
-    if (!uploadResp.ok) {
-      let msg = 'Video upload မအောင်မြင်ပါ (HTTP ' + uploadResp.status + ')';
-      try { const errData = await uploadResp.json(); if (errData && errData.error && errData.error.message) msg = errData.error.message; } catch(e) {}
+    if (!uploadRes.ok) {
+      let msg = 'Upload မအောင်မြင်ပါ (HTTP ' + uploadRes.status + ')';
+      try { const errData = await uploadRes.json(); if (errData && errData.error && errData.error.message) msg = errData.error.message; } catch(e) {}
       throw new Error(msg);
     }
-    const uploadData = await uploadResp.json();
-    const fileInfo = uploadData && uploadData.file;
-    if (!fileInfo || !fileInfo.uri || !fileInfo.name) {
-      throw new Error('Gemini file info ကို ဖတ်လို့ မရပါ။');
-    }
-    return fileInfo;
+    const data = await uploadRes.json();
+    if (!data || !data.file || !data.file.uri) throw new Error('Gemini file info ကို ဖတ်လို့ မရပါ။');
+    return data.file;
   }
 
-  async function waitForGeminiFileActive(fileName, apiKey, onStatus) {
-    const maxAttempts = 60;
-    for (let i = 0; i < maxAttempts; i++) {
-      const resp = await fetch(GEMINI_FILES_BASE + fileName, {
-        headers: { 'x-goog-api-key': apiKey }
-      });
-      if (!resp.ok) {
-        let msg = 'Video processing status ကို စစ်လို့ မရပါ (HTTP ' + resp.status + ')';
-        try { const errData = await resp.json(); if (errData && errData.error && errData.error.message) msg = errData.error.message; } catch(e) {}
-        throw new Error(msg);
-      }
-      const data = await resp.json();
-      const state = data && data.state;
-      if (state === 'ACTIVE') return data;
-      if (state === 'FAILED') throw new Error('Gemini ကနေ video ကို process လုပ်လို့ မရပါ။');
-      if (onStatus) onStatus('Gemini က video ကို process လုပ်နေပါသည်…');
+  async function waitForActive(apiKey, uri, onStatus) {
+    const fileId = uri.split('/').pop();
+    let state = 'PROCESSING';
+    let attempts = 0;
+    while (state !== 'ACTIVE' && attempts < 60) {
       await new Promise(r => setTimeout(r, 2000));
+      const res = await fetch('https://generativelanguage.googleapis.com/v1beta/files/' + fileId + '?key=' + encodeURIComponent(apiKey));
+      const data = await res.json();
+      state = data.state;
+      if (state === 'FAILED') throw new Error('Media processing မအောင်မြင်ပါ။');
+      if (onStatus) onStatus('Gemini က media ကို process လုပ်နေပါသည်…');
+      attempts++;
     }
-    throw new Error('Video processing ကြာလွန်းနေပါသည် — ပြန်စမ်းကြည့်ပါ။');
+    if (state !== 'ACTIVE') throw new Error('Processing ကြာလွန်းနေပါသည် — ပြန်စမ်းကြည့်ပါ။');
   }
+
+  async function generateTranscript(apiKey, uri, model, srcLang, targetLang) {
+    const prompt = "System Instructions: You are a professional media analyzer and language expert.\n" +
+      "The provided media file's audio is in [" + (srcLang === 'auto' ? 'detect automatically' : srcLang) + "].\n\n" +
+      "Task:\n" +
+      "1. Listen and transcribe/translate the audio into [" + (targetLang === 'original' ? 'the original language spoken' : targetLang) + "].\n" +
+      "2. Output a valid SRT string. Format MUST BE: HH:MM:SS,mmm (e.g., 00:00:01,500 --> 00:00:04,200). Use commas for milliseconds.\n" +
+      "3. Provide a full plain text transcript.\n" +
+      "4. Create a specific voice tone prompt for TTS (Text-to-Speech) that matches the mood of the audio.\n\n" +
+      "CRITICAL: If a target language is specified, output ONLY that language. No dual-language subtitles.\n\n" +
+      "JSON Structure:\n" +
+      "{\n  \"srt\": \"strictly formatted srt string\",\n  \"transcript\": \"full transcript text\",\n  \"tts_prompt\": \"descriptive voice tone prompt\"\n}";
+
+    const res = await fetch('https://generativelanguage.googleapis.com/v1beta/' + model + ':generateContent?key=' + encodeURIComponent(apiKey), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }, { file_data: { mime_type: videoFile.type || 'application/octet-stream', file_uri: uri } }] }],
+        generationConfig: { temperature: 0.1, responseMimeType: 'application/json' }
+      })
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error.message);
+    const candidate = data.candidates && data.candidates[0];
+    const textResult = candidate && candidate.content && candidate.content.parts && candidate.content.parts[0] && candidate.content.parts[0].text;
+    if (!textResult) throw new Error('Gemini ကနေ output မရပါ။');
+    const parsed = JSON.parse(textResult);
+    return { srt: parsed.srt || '', transcript: parsed.transcript || '', prompt: parsed.tts_prompt || '' };
+  }
+
+  function renderResultTab(tab) {
+    currentResultTab = tab;
+    resultTabBtns.forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+    if (tab === 'srt') transcriptText.value = generatedData.srt;
+    else if (tab === 'transcript') transcriptText.value = generatedData.transcript;
+    else transcriptText.value = generatedData.prompt;
+  }
+  resultTabBtns.forEach(btn => {
+    btn.addEventListener('click', () => renderResultTab(btn.dataset.tab));
+  });
 
   transcribeBtn.addEventListener('click', async () => {
     const apiKey = (geminiApiKeyInput.value || '').trim();
@@ -4344,71 +4464,40 @@ ${FAVICON}
       return;
     }
     if (!videoFile) {
-      setTranscribeStatus('Video file တစ်ခု ရွေးပေးပါ။', 'err');
+      setTranscribeStatus('Video/Audio file တစ်ခု ရွေးပေးပါ။', 'err');
       return;
     }
-    if (videoFile.size > MAX_VIDEO_BYTES) {
-      setTranscribeStatus('Video file ဟာ 2GB ထက် ကြီးနေပါသည် — ပိုသေးတဲ့ file ဖြင့် စမ်းကြည့်ပါ။', 'err');
+    if (!modelSelect.value) {
+      setTranscribeStatus('Model ကို ရွေးပေးပါ (Load Models နှိပ်ပါ)။', 'err');
       return;
     }
+
+    const model = modelSelect.value;
+    const srcLang = sourceLanguageSelect.value;
+    const targetLang = targetLanguageSelect.value;
 
     transcribeBtn.disabled = true;
     transcribeSpinner.classList.add('on');
-    transcribeLabel.textContent = 'Transcribing…';
+    transcribeLabel.textContent = 'Processing…';
     transcriptOutput.classList.remove('show');
-    setTranscribeStatus('Video ကို Gemini ဆီ upload စလုပ်နေပါသည်…', '');
+    setTranscribeStatus('Media ကို upload လုပ်နေပါသည်…', '');
 
     try {
-      const uploadedFile = await uploadVideoToGemini(videoFile, apiKey, (msg) => setTranscribeStatus(msg, ''));
-      const activeFile = await waitForGeminiFileActive(uploadedFile.name, apiKey, (msg) => setTranscribeStatus(msg, ''));
-      setTranscribeStatus('Gemini ကို transcribe ခိုင်းနေပါသည်…', '');
-
-      const promptText = 'Transcribe every spoken word in this video exactly as spoken, in the original language(s) used — do not translate. Whenever there is a silent pause between words, phrases, or sentences lasting about 0.3 seconds or longer, insert a marker in the exact format [pause:X.X] (X.X = pause duration in seconds, one decimal place) at that point in the transcript, in place of the pause. Do not add speaker labels, timestamps, headers, or any commentary — output only the transcript text with inline pause markers.';
-
-      const resp = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey
-        },
-        body: JSON.stringify({
-          model: GEMINI_MODEL,
-          input: [
-            { type: 'video', uri: activeFile.uri, mime_type: activeFile.mimeType || videoFile.type || 'video/mp4' },
-            { type: 'text', text: promptText }
-          ]
-        })
-      });
-
-      const data = await resp.json();
-
-      if (!resp.ok) {
-        const msg = (data && data.error && data.error.message) ? data.error.message : ('Gemini API error (HTTP ' + resp.status + ')');
-        throw new Error(msg);
-      }
-
-      const steps = (data && data.steps) || [];
-      const outText = steps
-        .filter(s => s && s.type === 'model_output' && Array.isArray(s.content))
-        .flatMap(s => s.content)
-        .filter(c => c && c.type === 'text' && c.text)
-        .map(c => c.text)
-        .join('')
-        .trim();
-
-      if (!outText) {
-        throw new Error('Transcript မထွက်ပါ — video ထဲမှာ စကားပြောပါ/မပါ ပြန်စစ်ပေးပါ။');
-      }
-
-      transcriptText.value = outText;
+      const fileInfo = await performUpload(apiKey, videoFile, (msg) => setTranscribeStatus(msg, ''));
+      setTranscribeStatus('AI Analyzing Content…', '');
+      await waitForActive(apiKey, fileInfo.uri, (msg) => setTranscribeStatus(msg, ''));
+      setTranscribeStatus(targetLang === 'original' ? ('Transcribing (' + srcLang + ')…') : ('Translating ' + srcLang + ' to ' + targetLang + '…'), '');
+      generatedData = await generateTranscript(apiKey, fileInfo.uri, model, srcLang, targetLang);
+      renderResultTab('srt');
       transcriptOutput.classList.add('show');
-      setTranscribeStatus('Transcript ရပါပြီ ✓', 'ok');
+      setTranscribeStatus('ပြီးပါပြီ ✓', 'ok');
     } catch (e) {
-      setTranscribeStatus(e && e.message ? e.message : 'Transcribe လုပ်လို့ မရပါ။', 'err');
+      setTranscribeStatus(e && e.message ? e.message : 'Processing မအောင်မြင်ပါ။', 'err');
     } finally {
       transcribeBtn.disabled = false;
       transcribeSpinner.classList.remove('on');
-      transcribeLabel.textContent = 'Transcribe video';
+      transcribeLabel.textContent = 'Start processing';
+      updateStartButtonState();
     }
   });
 
@@ -4423,6 +4512,18 @@ ${FAVICON}
       transcriptText.select();
       document.execCommand('copy');
     }
+  });
+
+  downloadTranscriptBtn.addEventListener('click', () => {
+    const content = transcriptText.value;
+    if (!content) return;
+    const ext = currentResultTab === 'srt' ? '.srt' : (currentResultTab === 'transcript' ? '.txt' : '_prompt.txt');
+    const blob = new Blob([content], { type: 'text/plain' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = (videoFile ? videoFile.name.split('.')[0] : 'output') + '_' + currentResultTab + ext;
+    a.click();
+    URL.revokeObjectURL(a.href);
   });
 })();
 </script>
