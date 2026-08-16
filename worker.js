@@ -4179,7 +4179,7 @@ ${FAVICON}
   // Video Transcript (Gemini API) — self-contained, does not touch Voice Studio
   // ===========================================================================
   const $ = id => document.getElementById(id);
-  const GEMINI_MODEL = 'gemini-2.0-flash';
+  const GEMINI_MODEL = 'gemini-2.5-flash';
   const GEMINI_KEY_STORAGE = 'kpv_gemini_api_key';
   const GEMINI_UPLOAD_URL = 'https://generativelanguage.googleapis.com/upload/v1beta/files';
   const GEMINI_FILES_BASE = 'https://generativelanguage.googleapis.com/v1beta/';
