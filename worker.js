@@ -4417,16 +4417,16 @@ ${FAVICON}
   }
 
   async function generateTranscript(apiKey, uri, model, srcLang, targetLang) {
-    const prompt = "System Instructions: You are a professional media analyzer and language expert.\n" +
-      "The provided media file's audio is in [" + (srcLang === 'auto' ? 'detect automatically' : srcLang) + "].\n\n" +
-      "Task:\n" +
-      "1. Listen and transcribe/translate the audio into [" + (targetLang === 'original' ? 'the original language spoken' : targetLang) + "].\n" +
-      "2. Output a valid SRT string. Format MUST BE: HH:MM:SS,mmm (e.g., 00:00:01,500 --> 00:00:04,200). Use commas for milliseconds.\n" +
-      "3. Provide a full plain text transcript.\n" +
-      "4. Create a specific voice tone prompt for TTS (Text-to-Speech) that matches the mood of the audio.\n\n" +
-      "CRITICAL: If a target language is specified, output ONLY that language. No dual-language subtitles.\n\n" +
-      "JSON Structure:\n" +
-      "{\n  \"srt\": \"strictly formatted srt string\",\n  \"transcript\": \"full transcript text\",\n  \"tts_prompt\": \"descriptive voice tone prompt\"\n}";
+    const prompt = "System Instructions: You are a professional media analyzer and language expert.\\n" +
+      "The provided media file's audio is in [" + (srcLang === 'auto' ? 'detect automatically' : srcLang) + "].\\n\\n" +
+      "Task:\\n" +
+      "1. Listen and transcribe/translate the audio into [" + (targetLang === 'original' ? 'the original language spoken' : targetLang) + "].\\n" +
+      "2. Output a valid SRT string. Format MUST BE: HH:MM:SS,mmm (e.g., 00:00:01,500 --> 00:00:04,200). Use commas for milliseconds.\\n" +
+      "3. Provide a full plain text transcript.\\n" +
+      "4. Create a specific voice tone prompt for TTS (Text-to-Speech) that matches the mood of the audio.\\n\\n" +
+      "CRITICAL: If a target language is specified, output ONLY that language. No dual-language subtitles.\\n\\n" +
+      "JSON Structure:\\n" +
+      "{\\n  \\"srt\\": \\"strictly formatted srt string\\",\\n  \\"transcript\\": \\"full transcript text\\",\\n  \\"tts_prompt\\": \\"descriptive voice tone prompt\\"\\n}";
 
     const res = await fetch('https://generativelanguage.googleapis.com/v1beta/' + model + ':generateContent?key=' + encodeURIComponent(apiKey), {
       method: 'POST',
