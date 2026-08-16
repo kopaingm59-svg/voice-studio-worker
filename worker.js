@@ -1,7 +1,7 @@
 // ===========================================================================
 // Cloudflare Worker - Ko Paing AI Voice Studio (Backend + Frontend)
 // (D1 Database Edition - Firebase removed)
-// ===========================================================================
+// =========================================================================
 
 const ADMIN_TELEGRAM_USERNAME = 'kopaing209'; // @ မထည့်ပါနှင့်
 const TELEGRAM_BOT_USERNAME = 'kopaingvcabot'; // Referral link (t.me/<username>?startapp=CODE) တည်ဆောက်ဖို့ Bot Username ကို ဒီမှာပြောင်းထည့်ပါ — @ မထည့်ပါနှင့်
