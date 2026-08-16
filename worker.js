@@ -1,7 +1,7 @@
 // ===========================================================================
 // Cloudflare Worker - Ko Paing AI Voice Studio (Backend + Frontend)
 // (D1 Database Edition - Firebase removed)
-// =========================================================================
+// ===========================================================================
 
 const ADMIN_TELEGRAM_USERNAME = 'kopaing209'; // @ မထည့်ပါနှင့်
 const TELEGRAM_BOT_USERNAME = 'kopaingvcabot'; // Referral link (t.me/<username>?startapp=CODE) တည်ဆောက်ဖို့ Bot Username ကို ဒီမှာပြောင်းထည့်ပါ — @ မထည့်ပါနှင့်
@@ -3690,7 +3690,12 @@ ${FAVICON}
     </div>
   </header>
 
-  <div class="reel">
+  <div class="tabs" id="pageTabs" style="margin-bottom:20px;">
+    <button type="button" class="tab-btn active" data-page="studio">Voice Studio</button>
+    <button type="button" class="tab-btn" data-page="transcript">Video Transcript</button>
+  </div>
+
+  <div class="reel" id="pageStudio">
 
     <section class="stage">
       <div class="stage-body">
@@ -3780,6 +3785,61 @@ ${FAVICON}
             <audio id="audioPlayer" controls></audio>
             <div class="output-foot">
               <button class="download" id="sendTelegramBtn" type="button">Telegram ကို ပို့ပါ</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+  <div class="reel" id="pageTranscript" style="display:none;">
+
+    <section class="stage">
+      <div class="stage-body">
+        <div class="stage-head">
+          <h2>Video</h2>
+          <span class="stage-hint">upload a clip to transcribe its speech</span>
+        </div>
+        <div class="stage-inner">
+          <label for="geminiApiKeyInput">Gemini API key <span class="req">*</span></label>
+          <input type="text" id="geminiApiKeyInput" placeholder="AIza…">
+          <div class="stage-hint" style="color:#8f8879; margin-top:6px; text-transform:none; letter-spacing:0;">Key ကို ဒီ browser ပေါ်မှာသာ (local) သိမ်းထားပြီး ဒီ server ရဲ့ Database ထဲ လုံးဝမသိမ်းပါ — နောက်တစ်ခါ ပြန်လာသုံးရင် အလိုအလျောက် ပြန်ဖြည့်ပေးပါလိမ့်မယ်။</div>
+
+          <div style="margin-top:20px;">
+            <label>Video file <span class="req">*</span></label>
+            <div class="dropzone" id="videoDropzone">
+              <div class="glyph">▶</div>
+              <div class="text">
+                <div class="filename" id="videoFileNameLabel">Choose a video file, or drop one here</div>
+                <div class="hint">MP4, MOV, WEBM… keep it under ~20MB for best results</div>
+              </div>
+              <button class="clear" id="clearVideoFile" type="button" title="Remove">&times;</button>
+            </div>
+            <input type="file" id="videoInput" accept="video/*">
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="stage">
+      <div class="stage-body">
+        <div class="stage-head">
+          <h2>Transcript</h2>
+          <span class="stage-hint">speech-to-text, with pause markers</span>
+        </div>
+        <div class="stage-inner">
+          <button class="generate" id="transcribeBtn">
+            <span class="spinner" id="transcribeSpinner"></span>
+            <span id="transcribeLabel">Transcribe video</span>
+          </button>
+          <div class="status" id="transcribeStatusLine"></div>
+
+          <div class="output" id="transcriptOutput">
+            <div class="output-head">Transcript</div>
+            <textarea id="transcriptText" readonly style="width:100%; min-height:160px; font-family:'IBM Plex Mono', monospace; font-size:13px; background:#fff; border:1px solid var(--line); border-radius:var(--radius-md); padding:12px 14px; color:var(--ink);"></textarea>
+            <div class="output-foot">
+              <button class="download" id="copyTranscriptBtn" type="button">Copy Transcript</button>
             </div>
           </div>
         </div>
@@ -4108,6 +4168,256 @@ ${FAVICON}
     } finally {
       sendTelegramBtn.disabled = false;
       sendTelegramBtn.textContent = original;
+    }
+  });
+})();
+</script>
+
+<script>
+(function(){
+  // ===========================================================================
+  // Video Transcript (Gemini API) — self-contained, does not touch Voice Studio
+  // ===========================================================================
+  const $ = id => document.getElementById(id);
+  const GEMINI_MODEL = 'gemini-2.0-flash';
+  const GEMINI_KEY_STORAGE = 'kpv_gemini_api_key';
+  const GEMINI_UPLOAD_URL = 'https://generativelanguage.googleapis.com/upload/v1beta/files';
+  const GEMINI_FILES_BASE = 'https://generativelanguage.googleapis.com/v1beta/';
+  const MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024; // Gemini File API per-file limit (~2GB)
+
+  const pageTabBtns   = document.querySelectorAll('#pageTabs .tab-btn');
+  const pageStudio    = $('pageStudio');
+  const pageTranscript = $('pageTranscript');
+
+  pageTabBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (btn.classList.contains('active')) return;
+      pageTabBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const isTranscript = btn.dataset.page === 'transcript';
+      pageStudio.style.display = isTranscript ? 'none' : '';
+      pageTranscript.style.display = isTranscript ? '' : 'none';
+    });
+  });
+
+  const geminiApiKeyInput = $('geminiApiKeyInput');
+  const videoDropzone      = $('videoDropzone');
+  const videoInput         = $('videoInput');
+  const videoFileNameLabel = $('videoFileNameLabel');
+  const clearVideoFileBtn  = $('clearVideoFile');
+
+  const transcribeBtn      = $('transcribeBtn');
+  const transcribeLabel    = $('transcribeLabel');
+  const transcribeSpinner  = $('transcribeSpinner');
+  const transcribeStatusLine = $('transcribeStatusLine');
+  const transcriptOutput   = $('transcriptOutput');
+  const transcriptText     = $('transcriptText');
+  const copyTranscriptBtn  = $('copyTranscriptBtn');
+
+  // Api Key ကို server/DB ကို ပို့မထားပါ — browser localStorage ထဲမှာသာ ဒီစက်ပေါ်တွင်
+  // နောက်တစ်ခါပြန်သုံးလို့ရအောင် သိမ်းထားပါသည်
+  try {
+    const savedKey = localStorage.getItem(GEMINI_KEY_STORAGE);
+    if (savedKey) geminiApiKeyInput.value = savedKey;
+  } catch(e) {}
+  geminiApiKeyInput.addEventListener('input', () => {
+    try { localStorage.setItem(GEMINI_KEY_STORAGE, geminiApiKeyInput.value.trim()); } catch(e) {}
+  });
+
+  let videoFile = null;
+
+  function setVideoFile(file) {
+    videoFile = file || null;
+    if (videoFile) {
+      videoFileNameLabel.textContent = videoFile.name;
+      videoDropzone.classList.add('has-file');
+    } else {
+      videoFileNameLabel.textContent = 'Choose a video file, or drop one here';
+      videoDropzone.classList.remove('has-file');
+    }
+  }
+
+  videoDropzone.addEventListener('click', (e) => {
+    if (e.target === clearVideoFileBtn) return;
+    videoInput.click();
+  });
+  videoInput.addEventListener('change', () => {
+    setVideoFile(videoInput.files && videoInput.files[0] ? videoInput.files[0] : null);
+  });
+  clearVideoFileBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    videoInput.value = '';
+    setVideoFile(null);
+  });
+  ['dragover','dragenter'].forEach(evt => {
+    videoDropzone.addEventListener(evt, (e) => { e.preventDefault(); videoDropzone.classList.add('drag'); });
+  });
+  ['dragleave','drop'].forEach(evt => {
+    videoDropzone.addEventListener(evt, (e) => { e.preventDefault(); videoDropzone.classList.remove('drag'); });
+  });
+  videoDropzone.addEventListener('drop', (e) => {
+    const f = e.dataTransfer && e.dataTransfer.files ? e.dataTransfer.files[0] : null;
+    if (f) setVideoFile(f);
+  });
+
+  function setTranscribeStatus(msg, kind) {
+    transcribeStatusLine.textContent = msg || '';
+    transcribeStatusLine.className = 'status' + (kind ? (' ' + kind) : '');
+  }
+
+  // Gemini File API — resumable upload (video ကို base64 inline ပို့မယ့်အစား file အနေနဲ့
+  // upload လုပ်ပြီး file_uri ကိုသာ generateContent ကို ပို့ပါသည် — ဒီနည်းက video ကြီးကြီး/
+  // ကြာကြာတွေအတွက် ပိုအဆင်ပြေပြီး request size limit ကို ရှောင်နိုင်ပါသည်)
+  async function uploadVideoToGemini(file, apiKey, onStatus) {
+    const startResp = await fetch(GEMINI_UPLOAD_URL, {
+      method: 'POST',
+      headers: {
+        'x-goog-api-key': apiKey,
+        'X-Goog-Upload-Protocol': 'resumable',
+        'X-Goog-Upload-Command': 'start',
+        'X-Goog-Upload-Header-Content-Length': String(file.size),
+        'X-Goog-Upload-Header-Content-Type': file.type || 'video/mp4',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ file: { display_name: file.name || 'video' } })
+    });
+    if (!startResp.ok) {
+      let msg = 'Gemini upload session ကို စတင်လို့ မရပါ (HTTP ' + startResp.status + ')';
+      try { const errData = await startResp.json(); if (errData && errData.error && errData.error.message) msg = errData.error.message; } catch(e) {}
+      throw new Error(msg);
+    }
+    const uploadUrl = startResp.headers.get('x-goog-upload-url');
+    if (!uploadUrl) {
+      throw new Error('Gemini upload URL မရပါ — API Key ကို ပြန်စစ်ပေးပါ။');
+    }
+
+    if (onStatus) onStatus('Video ကို Gemini ဆီ upload လုပ်နေပါသည်…');
+
+    const uploadResp = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Length': String(file.size),
+        'X-Goog-Upload-Offset': '0',
+        'X-Goog-Upload-Command': 'upload, finalize'
+      },
+      body: file
+    });
+    if (!uploadResp.ok) {
+      let msg = 'Video upload မအောင်မြင်ပါ (HTTP ' + uploadResp.status + ')';
+      try { const errData = await uploadResp.json(); if (errData && errData.error && errData.error.message) msg = errData.error.message; } catch(e) {}
+      throw new Error(msg);
+    }
+    const uploadData = await uploadResp.json();
+    const fileInfo = uploadData && uploadData.file;
+    if (!fileInfo || !fileInfo.uri || !fileInfo.name) {
+      throw new Error('Gemini file info ကို ဖတ်လို့ မရပါ။');
+    }
+    return fileInfo;
+  }
+
+  async function waitForGeminiFileActive(fileName, apiKey, onStatus) {
+    const maxAttempts = 60;
+    for (let i = 0; i < maxAttempts; i++) {
+      const resp = await fetch(GEMINI_FILES_BASE + fileName, {
+        headers: { 'x-goog-api-key': apiKey }
+      });
+      if (!resp.ok) {
+        let msg = 'Video processing status ကို စစ်လို့ မရပါ (HTTP ' + resp.status + ')';
+        try { const errData = await resp.json(); if (errData && errData.error && errData.error.message) msg = errData.error.message; } catch(e) {}
+        throw new Error(msg);
+      }
+      const data = await resp.json();
+      const state = data && data.state;
+      if (state === 'ACTIVE') return data;
+      if (state === 'FAILED') throw new Error('Gemini ကနေ video ကို process လုပ်လို့ မရပါ။');
+      if (onStatus) onStatus('Gemini က video ကို process လုပ်နေပါသည်…');
+      await new Promise(r => setTimeout(r, 2000));
+    }
+    throw new Error('Video processing ကြာလွန်းနေပါသည် — ပြန်စမ်းကြည့်ပါ။');
+  }
+
+  transcribeBtn.addEventListener('click', async () => {
+    const apiKey = (geminiApiKeyInput.value || '').trim();
+    if (!apiKey) {
+      setTranscribeStatus('Gemini API Key ထည့်ပေးပါ။', 'err');
+      geminiApiKeyInput.focus();
+      return;
+    }
+    if (!videoFile) {
+      setTranscribeStatus('Video file တစ်ခု ရွေးပေးပါ။', 'err');
+      return;
+    }
+    if (videoFile.size > MAX_VIDEO_BYTES) {
+      setTranscribeStatus('Video file ဟာ 2GB ထက် ကြီးနေပါသည် — ပိုသေးတဲ့ file ဖြင့် စမ်းကြည့်ပါ။', 'err');
+      return;
+    }
+
+    transcribeBtn.disabled = true;
+    transcribeSpinner.classList.add('on');
+    transcribeLabel.textContent = 'Transcribing…';
+    transcriptOutput.classList.remove('show');
+    setTranscribeStatus('Video ကို Gemini ဆီ upload စလုပ်နေပါသည်…', '');
+
+    try {
+      const uploadedFile = await uploadVideoToGemini(videoFile, apiKey, (msg) => setTranscribeStatus(msg, ''));
+      const activeFile = await waitForGeminiFileActive(uploadedFile.name, apiKey, (msg) => setTranscribeStatus(msg, ''));
+      setTranscribeStatus('Gemini ကို transcribe ခိုင်းနေပါသည်…', '');
+
+      const promptText = 'Transcribe every spoken word in this video exactly as spoken, in the original language(s) used — do not translate. Whenever there is a silent pause between words, phrases, or sentences lasting about 0.3 seconds or longer, insert a marker in the exact format [pause:X.X] (X.X = pause duration in seconds, one decimal place) at that point in the transcript, in place of the pause. Do not add speaker labels, timestamps, headers, or any commentary — output only the transcript text with inline pause markers.';
+
+      const resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + GEMINI_MODEL + ':generateContent', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey
+        },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { file_data: { mime_type: activeFile.mimeType || videoFile.type || 'video/mp4', file_uri: activeFile.uri } },
+              { text: promptText }
+            ]
+          }]
+        })
+      });
+
+      const data = await resp.json();
+
+      if (!resp.ok) {
+        const msg = (data && data.error && data.error.message) ? data.error.message : ('Gemini API error (HTTP ' + resp.status + ')');
+        throw new Error(msg);
+      }
+
+      const candidate = data && data.candidates && data.candidates[0];
+      const parts = candidate && candidate.content && candidate.content.parts ? candidate.content.parts : [];
+      const outText = parts.map(p => p.text || '').join('').trim();
+
+      if (!outText) {
+        throw new Error('Transcript မထွက်ပါ — video ထဲမှာ စကားပြောပါ/မပါ ပြန်စစ်ပေးပါ။');
+      }
+
+      transcriptText.value = outText;
+      transcriptOutput.classList.add('show');
+      setTranscribeStatus('Transcript ရပါပြီ ✓', 'ok');
+    } catch (e) {
+      setTranscribeStatus(e && e.message ? e.message : 'Transcribe လုပ်လို့ မရပါ။', 'err');
+    } finally {
+      transcribeBtn.disabled = false;
+      transcribeSpinner.classList.remove('on');
+      transcribeLabel.textContent = 'Transcribe video';
+    }
+  });
+
+  copyTranscriptBtn.addEventListener('click', async () => {
+    if (!transcriptText.value) return;
+    try {
+      await navigator.clipboard.writeText(transcriptText.value);
+      const original = copyTranscriptBtn.textContent;
+      copyTranscriptBtn.textContent = 'Copied ✓';
+      setTimeout(() => { copyTranscriptBtn.textContent = original; }, 1500);
+    } catch (e) {
+      transcriptText.select();
+      document.execCommand('copy');
     }
   });
 })();
