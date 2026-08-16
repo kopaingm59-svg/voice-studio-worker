@@ -4365,19 +4365,18 @@ ${FAVICON}
 
       const promptText = 'Transcribe every spoken word in this video exactly as spoken, in the original language(s) used — do not translate. Whenever there is a silent pause between words, phrases, or sentences lasting about 0.3 seconds or longer, insert a marker in the exact format [pause:X.X] (X.X = pause duration in seconds, one decimal place) at that point in the transcript, in place of the pause. Do not add speaker labels, timestamps, headers, or any commentary — output only the transcript text with inline pause markers.';
 
-      const resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + GEMINI_MODEL + ':generateContent', {
+      const resp = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'x-goog-api-key': apiKey
         },
         body: JSON.stringify({
-          contents: [{
-            parts: [
-              { file_data: { mime_type: activeFile.mimeType || videoFile.type || 'video/mp4', file_uri: activeFile.uri } },
-              { text: promptText }
-            ]
-          }]
+          model: GEMINI_MODEL,
+          input: [
+            { type: 'video', uri: activeFile.uri, mime_type: activeFile.mimeType || videoFile.type || 'video/mp4' },
+            { type: 'text', text: promptText }
+          ]
         })
       });
 
@@ -4388,9 +4387,14 @@ ${FAVICON}
         throw new Error(msg);
       }
 
-      const candidate = data && data.candidates && data.candidates[0];
-      const parts = candidate && candidate.content && candidate.content.parts ? candidate.content.parts : [];
-      const outText = parts.map(p => p.text || '').join('').trim();
+      const steps = (data && data.steps) || [];
+      const outText = steps
+        .filter(s => s && s.type === 'model_output' && Array.isArray(s.content))
+        .flatMap(s => s.content)
+        .filter(c => c && c.type === 'text' && c.text)
+        .map(c => c.text)
+        .join('')
+        .trim();
 
       if (!outText) {
         throw new Error('Transcript မထွက်ပါ — video ထဲမှာ စကားပြောပါ/မပါ ပြန်စစ်ပေးပါ။');
