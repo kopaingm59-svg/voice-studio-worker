@@ -3457,6 +3457,7 @@ function getStudioHtml() {
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Ko Paing 🎙️ AI Voice Studio</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="//libtl.com/sdk.js" data-zone="11602199" data-sdk="show_11602199"></script>
 ${FAVICON}
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;1,9..144,500&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap');
@@ -4472,6 +4473,18 @@ ${FAVICON}
     btn.addEventListener('click', () => renderResultTab(btn.dataset.tab));
   });
 
+  // Monetag Rewarded Interstitial — Video Transcript ပြီးဆုံးတဲ့အချိန်မှာ ready
+  // ဖြစ်နေတဲ့ ad ကို ပြပါသည် (libtl.com/sdk.js ကနေ window.show_11602199 ကို
+  // <head> ထဲက script tag က ပေးထားပါသည်)
+  function showTranscriptRewardAd() {
+    if (typeof window.show_11602199 !== 'function') return;
+    window.show_11602199().then(() => {
+      // user က ad ကို အဆုံးအထိ ကြည့်ပြီးပါပြီ
+    }).catch(() => {
+      // ad မပြနိုင်ခဲ့ရင် သို့မဟုတ် user ကျော်လိုက်ရင် transcript ကိုတော့ ပုံမှန်အတိုင်း ဆက်သုံးနိုင်ပါသည်
+    });
+  }
+
   transcribeBtn.addEventListener('click', async () => {
     const apiKey = (geminiApiKeyInput.value || '').trim();
     if (!apiKey) {
@@ -4507,6 +4520,7 @@ ${FAVICON}
       renderResultTab('srt');
       transcriptOutput.classList.add('show');
       setTranscribeStatus('ပြီးပါပြီ ✓', 'ok');
+      showTranscriptRewardAd();
     } catch (e) {
       setTranscribeStatus(e && e.message ? e.message : 'Processing မအောင်မြင်ပါ။', 'err');
     } finally {
