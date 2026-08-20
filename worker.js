@@ -3801,6 +3801,7 @@ ${FAVICON}
             <div class="output-head">Take rendered — <b id="outputMeta">—</b></div>
             <audio id="audioPlayer" controls></audio>
             <div class="output-foot">
+              <button class="download" id="downloadAudioBtn" type="button">Download</button>
               <button class="download" id="sendTelegramBtn" type="button">Telegram ကို ပို့ပါ</button>
             </div>
           </div>
@@ -3955,6 +3956,7 @@ ${FAVICON}
   const audioPlayer   = $('audioPlayer');
   const outputMeta     = $('outputMeta');
   const sendTelegramBtn = $('sendTelegramBtn');
+  const downloadAudioBtn = $('downloadAudioBtn');
 
   const voiceTypeSelect = $('voiceTypeSelect');
   const voiceTypeWrap = $('voiceTypeWrap');
@@ -4211,6 +4213,40 @@ ${FAVICON}
     output.classList.add('show');
     output.scrollIntoView({ behavior:'smooth', block:'nearest' });
   }
+
+  downloadAudioBtn.addEventListener('click', async () => {
+    if (!lastAudioBase64) return;
+    const original = downloadAudioBtn.textContent;
+    downloadAudioBtn.disabled = true;
+    downloadAudioBtn.textContent = 'ပြင်ဆင်နေသည်…';
+    try {
+      const res = await fetch('/api/generate/save-audio', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData: currentInitData(), audioBase64: lastAudioBase64, format: lastAudioFormat })
+      });
+      const data = await res.json();
+      if (res.ok && data.success && data.url) {
+        const fullUrl = location.origin + data.url;
+        // Telegram Mini App ရဲ့ built-in webview ထဲမှာ file download prompt မထွက်တတ်လို့
+        // system browser (Chrome) ထဲမှာ တိုက်ရိုက်ဖွင့်ပြီး Content-Disposition header
+        // အရ Chrome ရဲ့ built-in download ကို trigger လုပ်ပါသည်
+        if (tg && typeof tg.openLink === 'function') {
+          tg.openLink(fullUrl, { try_instant_view: false });
+        } else {
+          window.open(fullUrl, '_blank');
+        }
+        setStatus('Chrome ထဲမှာ Download စတင်ပါပြီ ✓', 'ok');
+      } else {
+        setStatus(data.error || 'Download link ပြင်ဆင်လို့ မရပါ။', 'err');
+      }
+    } catch (e) {
+      setStatus('Network error — Download link ပြင်ဆင်လို့ မရပါ။', 'err');
+    } finally {
+      downloadAudioBtn.disabled = false;
+      downloadAudioBtn.textContent = original;
+    }
+  });
 
   sendTelegramBtn.addEventListener('click', async () => {
     if (!lastAudioBase64 || !tgUser || !tgUser.id) return;
