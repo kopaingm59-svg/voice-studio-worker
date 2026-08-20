@@ -2897,7 +2897,7 @@ function getAdminDashboardHtml() {
 
     function requestStatusBadge(status) {
       const map = {
-        COMPLETED: ['badge', '#b8860b', 'Completed'],
+        COMPLETED: ['badge', '#1a7a44', 'Completed'],
         FAILED: ['badge', '#c0392b', 'Failed'],
         CANCELLED: ['badge', '#888', 'Cancelled'],
         IN_PROGRESS: ['badge', '#a17a1c', 'In Progress'],
@@ -3008,7 +3008,7 @@ function getAdminDashboardHtml() {
         reader.onload = () => {
           newPresetAudioBase64 = reader.result.split(',')[1];
           statusEl.textContent = f.name + ' ✓ ready to upload';
-          statusEl.style.color = '#b8860b';
+          statusEl.style.color = '#1a7a44';
         };
         reader.readAsDataURL(f);
       });
@@ -3450,9 +3450,9 @@ ${FAVICON}
     --paper:    #ffffff;
     --panel:    #ffffff;
     --line:     #e0e6e1;
-    --moss:     #b8860b;
-    --moss-dim: #e0c589;
-    --moss-soft:#fdf6e0;
+    --moss:     #1a7a44;
+    --moss-dim: #8fbfa2;
+    --moss-soft:#eaf7ee;
     --wax:      #c0392b;
     --wax-dim:  #e3a99c;
     --radius-lg: 22px;
@@ -3473,8 +3473,8 @@ ${FAVICON}
     content:"";
     position:fixed; inset:0; z-index:0; pointer-events:none;
     background-image:
-      linear-gradient(rgba(184,134,11,0.05) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(184,134,11,0.05) 1px, transparent 1px);
+      linear-gradient(rgba(26,122,68,0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(26,122,68,0.05) 1px, transparent 1px);
     background-size:26px 26px;
   }
   .wrap{ position:relative; z-index:1; max-width:720px; margin:0 auto; padding:28px 24px 90px; }
@@ -3498,7 +3498,7 @@ ${FAVICON}
     display:flex; align-items:center; gap:8px; margin-bottom:14px;
   }
   .eyebrow .dot{ width:6px; height:6px; border-radius:50%; background:var(--moss-dim); display:inline-block; }
-  .eyebrow .dot.live{ background:var(--moss); box-shadow:0 0 0 3px rgba(184,134,11,0.15); }
+  .eyebrow .dot.live{ background:var(--moss); box-shadow:0 0 0 3px rgba(26,122,68,0.15); }
   .head-row{ display:flex; justify-content:space-between; align-items:flex-end; gap:20px; }
   h1{
     font-family:'Fraunces', serif; font-optical-sizing:auto; font-weight:600;
@@ -3549,21 +3549,21 @@ ${FAVICON}
     outline:none; resize:vertical; min-height:84px; line-height:1.5;
     transition:border-color .15s ease, box-shadow .15s ease;
   }
-  textarea:focus{ border-color:var(--moss); box-shadow:0 0 0 4px rgba(184,134,11,0.12); }
+  textarea:focus{ border-color:var(--moss); box-shadow:0 0 0 4px rgba(26,122,68,0.12); }
   textarea::placeholder{ color:#b7b0a2; }
   input[type="text"]{
     width:100%; background:#fff; border:1px solid var(--line); border-radius:var(--radius-md);
     padding:11px 14px; font-family:'Inter', sans-serif; font-size:15px; color:var(--ink);
     outline:none; transition:border-color .15s ease, box-shadow .15s ease;
   }
-  input[type="text"]:focus{ border-color:var(--moss); box-shadow:0 0 0 4px rgba(184,134,11,0.12); }
+  input[type="text"]:focus{ border-color:var(--moss); box-shadow:0 0 0 4px rgba(26,122,68,0.12); }
   input::placeholder{ color:#b7b0a2; }
   select{
     width:100%; background:#fff; border:1px solid var(--line); border-radius:var(--radius-md);
     padding:11px 14px; font-family:'Inter', sans-serif; font-size:14px; color:var(--ink);
     outline:none; transition:border-color .15s ease, box-shadow .15s ease;
   }
-  select:focus{ border-color:var(--moss); box-shadow:0 0 0 4px rgba(184,134,11,0.12); }
+  select:focus{ border-color:var(--moss); box-shadow:0 0 0 4px rgba(26,122,68,0.12); }
   .voicetype{ margin-top:20px; }
   .tabs{
     display:flex; gap:6px; background:var(--moss-soft); border-radius:var(--radius-md);
@@ -3690,12 +3690,7 @@ ${FAVICON}
     </div>
   </header>
 
-  <div class="tabs" id="pageTabs" style="margin-bottom:20px;">
-    <button type="button" class="tab-btn active" data-page="studio">Voice Studio</button>
-    <button type="button" class="tab-btn" data-page="transcript">Video Transcript</button>
-  </div>
-
-  <div class="reel" id="pageStudio">
+  <div class="reel">
 
     <section class="stage">
       <div class="stage-body">
@@ -3785,110 +3780,6 @@ ${FAVICON}
             <audio id="audioPlayer" controls></audio>
             <div class="output-foot">
               <button class="download" id="sendTelegramBtn" type="button">Telegram ကို ပို့ပါ</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-  </div>
-
-  <div class="reel" id="pageTranscript" style="display:none;">
-
-    <section class="stage">
-      <div class="stage-body">
-        <div class="stage-head">
-          <h2>API Access</h2>
-          <span class="stage-hint">connect your Gemini key</span>
-        </div>
-        <div class="stage-inner">
-          <label for="geminiApiKeyInput">Gemini API key <span class="req">*</span></label>
-          <input type="text" id="geminiApiKeyInput" placeholder="AIza…">
-          <div class="stage-hint" style="color:#8f8879; margin-top:6px; text-transform:none; letter-spacing:0;">Key ကို ဒီ browser ပေါ်မှာသာ (local) သိမ်းထားပြီး ဒီ server ရဲ့ Database ထဲ လုံးဝမသိမ်းပါ — နောက်တစ်ခါ ပြန်လာသုံးရင် အလိုအလျောက် ပြန်ဖြည့်ပေးပါလိမ့်မယ်။</div>
-          <button class="download" id="loadModelsBtn" type="button" style="margin-top:14px;">Load Models</button>
-
-          <div id="modelSelectWrap" style="display:none; margin-top:18px;">
-            <div class="voicetype" style="margin-top:0;">
-              <label for="modelSelect">Model</label>
-              <select id="modelSelect"></select>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section class="stage">
-      <div class="stage-body">
-        <div class="stage-head">
-          <h2>Media</h2>
-          <span class="stage-hint">upload a video or audio clip</span>
-        </div>
-        <div class="stage-inner">
-          <div class="dropzone" id="videoDropzone">
-            <div class="glyph">▶</div>
-            <div class="text">
-              <div class="filename" id="videoFileNameLabel">Choose a video/audio file, or drop one here</div>
-              <div class="hint">MP4, MOV, WEBM, MP3, WAV… up to 2GB</div>
-            </div>
-            <button class="clear" id="clearVideoFile" type="button" title="Remove">&times;</button>
-          </div>
-          <input type="file" id="videoInput" accept="video/*,audio/*">
-
-          <div id="langWrap" style="display:none; margin-top:22px;">
-            <div class="voicetype" style="margin-top:0;">
-              <label for="sourceLanguageSelect">Audio language</label>
-              <select id="sourceLanguageSelect">
-                <option value="auto">Auto-detect Language</option>
-                <option value="English">English</option>
-                <option value="Burmese">Burmese (မြန်မာဘာသာ)</option>
-                <option value="Thai">Thai (ไทย)</option>
-                <option value="Chinese">Chinese (中文)</option>
-                <option value="Japanese">Japanese (日本語)</option>
-                <option value="Korean">Korean (한국어)</option>
-              </select>
-            </div>
-            <div class="voicetype">
-              <label for="targetLanguageSelect">Output language</label>
-              <select id="targetLanguageSelect">
-                <option value="original">Same as Audio</option>
-                <option value="English">English</option>
-                <option value="Burmese">Burmese (မြန်မာဘာသာ)</option>
-                <option value="Thai">Thai (ไทย)</option>
-                <option value="Chinese">Chinese (中文)</option>
-                <option value="Japanese">Japanese (日本語)</option>
-                <option value="Korean">Korean (한국어)</option>
-                <option value="Spanish">Spanish (Español)</option>
-                <option value="French">French (Français)</option>
-              </select>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section class="stage">
-      <div class="stage-body">
-        <div class="stage-head">
-          <h2>Transcript</h2>
-          <span class="stage-hint">SRT, transcript &amp; TTS voice prompt</span>
-        </div>
-        <div class="stage-inner">
-          <button class="generate" id="transcribeBtn" disabled>
-            <span class="spinner" id="transcribeSpinner"></span>
-            <span id="transcribeLabel">Start processing</span>
-          </button>
-          <div class="status" id="transcribeStatusLine"></div>
-
-          <div class="output" id="transcriptOutput">
-            <div class="tabs" id="resultTabs" style="margin-bottom:16px;">
-              <button type="button" class="tab-btn active" data-tab="srt">SRT</button>
-              <button type="button" class="tab-btn" data-tab="transcript">Transcript</button>
-              <button type="button" class="tab-btn" data-tab="prompt">TTS Prompt</button>
-            </div>
-            <textarea id="transcriptText" readonly style="width:100%; min-height:220px; font-family:'IBM Plex Mono', monospace; font-size:12.5px; background:#fff; border:1px solid var(--line); border-radius:var(--radius-md); padding:12px 14px; color:var(--ink);"></textarea>
-            <div class="output-foot" style="justify-content:space-between;">
-              <button class="download" id="copyTranscriptBtn" type="button">Copy</button>
-              <button class="download" id="downloadTranscriptBtn" type="button">Download</button>
             </div>
           </div>
         </div>
@@ -4218,312 +4109,6 @@ ${FAVICON}
       sendTelegramBtn.disabled = false;
       sendTelegramBtn.textContent = original;
     }
-  });
-})();
-</script>
-
-<script>
-(function(){
-  // ===========================================================================
-  // Video Transcript (Gemini API) — self-contained, does not touch Voice Studio
-  // Logic ported from the user's own Transcript AI Studio site (model list,
-  // language selection, SRT / Transcript / TTS-prompt JSON output).
-  // ===========================================================================
-  const $ = id => document.getElementById(id);
-  const GEMINI_KEY_STORAGE = 'kpv_gemini_api_key';
-
-  const pageTabBtns    = document.querySelectorAll('#pageTabs .tab-btn');
-  const pageStudio     = $('pageStudio');
-  const pageTranscript = $('pageTranscript');
-
-  pageTabBtns.forEach(btn => {
-    btn.addEventListener('click', () => {
-      if (btn.classList.contains('active')) return;
-      pageTabBtns.forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      const isTranscript = btn.dataset.page === 'transcript';
-      pageStudio.style.display = isTranscript ? 'none' : '';
-      pageTranscript.style.display = isTranscript ? '' : 'none';
-    });
-  });
-
-  const geminiApiKeyInput    = $('geminiApiKeyInput');
-  const loadModelsBtn        = $('loadModelsBtn');
-  const modelSelectWrap      = $('modelSelectWrap');
-  const modelSelect          = $('modelSelect');
-
-  const videoDropzone        = $('videoDropzone');
-  const videoInput           = $('videoInput');
-  const videoFileNameLabel   = $('videoFileNameLabel');
-  const clearVideoFileBtn    = $('clearVideoFile');
-  const langWrap             = $('langWrap');
-  const sourceLanguageSelect = $('sourceLanguageSelect');
-  const targetLanguageSelect = $('targetLanguageSelect');
-
-  const transcribeBtn        = $('transcribeBtn');
-  const transcribeLabel      = $('transcribeLabel');
-  const transcribeSpinner    = $('transcribeSpinner');
-  const transcribeStatusLine = $('transcribeStatusLine');
-  const transcriptOutput     = $('transcriptOutput');
-  const transcriptText       = $('transcriptText');
-  const resultTabBtns        = document.querySelectorAll('#resultTabs .tab-btn');
-  const copyTranscriptBtn    = $('copyTranscriptBtn');
-  const downloadTranscriptBtn = $('downloadTranscriptBtn');
-
-  // Api Key ကို server/DB ကို ပို့မထားပါ — browser localStorage ထဲမှာသာ ဒီစက်ပေါ်တွင်
-  // နောက်တစ်ခါပြန်သုံးလို့ရအောင် သိမ်းထားပါသည်
-  try {
-    const savedKey = localStorage.getItem(GEMINI_KEY_STORAGE);
-    if (savedKey) geminiApiKeyInput.value = savedKey;
-  } catch(e) {}
-  geminiApiKeyInput.addEventListener('input', () => {
-    try { localStorage.setItem(GEMINI_KEY_STORAGE, geminiApiKeyInput.value.trim()); } catch(e) {}
-  });
-
-  let videoFile = null;
-  let generatedData = { srt: '', transcript: '', prompt: '' };
-  let currentResultTab = 'srt';
-
-  function updateStartButtonState() {
-    transcribeBtn.disabled = !(videoFile && modelSelect.value);
-  }
-
-  function setVideoFile(file) {
-    videoFile = file || null;
-    if (videoFile) {
-      videoFileNameLabel.textContent = videoFile.name;
-      videoDropzone.classList.add('has-file');
-      langWrap.style.display = '';
-    } else {
-      videoFileNameLabel.textContent = 'Choose a video/audio file, or drop one here';
-      videoDropzone.classList.remove('has-file');
-      langWrap.style.display = 'none';
-    }
-    updateStartButtonState();
-  }
-
-  videoDropzone.addEventListener('click', (e) => {
-    if (e.target === clearVideoFileBtn) return;
-    videoInput.click();
-  });
-  videoInput.addEventListener('change', () => {
-    setVideoFile(videoInput.files && videoInput.files[0] ? videoInput.files[0] : null);
-  });
-  clearVideoFileBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    videoInput.value = '';
-    setVideoFile(null);
-  });
-  ['dragover','dragenter'].forEach(evt => {
-    videoDropzone.addEventListener(evt, (e) => { e.preventDefault(); videoDropzone.classList.add('drag'); });
-  });
-  ['dragleave','drop'].forEach(evt => {
-    videoDropzone.addEventListener(evt, (e) => { e.preventDefault(); videoDropzone.classList.remove('drag'); });
-  });
-  videoDropzone.addEventListener('drop', (e) => {
-    const f = e.dataTransfer && e.dataTransfer.files ? e.dataTransfer.files[0] : null;
-    if (f) setVideoFile(f);
-  });
-
-  function setTranscribeStatus(msg, kind) {
-    transcribeStatusLine.textContent = msg || '';
-    transcribeStatusLine.className = 'status' + (kind ? (' ' + kind) : '');
-  }
-
-  loadModelsBtn.addEventListener('click', fetchModels);
-  modelSelect.addEventListener('change', updateStartButtonState);
-
-  async function fetchModels() {
-    const apiKey = (geminiApiKeyInput.value || '').trim();
-    if (!apiKey) {
-      setTranscribeStatus('Gemini API Key ထည့်ပေးပါ။', 'err');
-      geminiApiKeyInput.focus();
-      return;
-    }
-    modelSelectWrap.style.display = '';
-    modelSelect.innerHTML = '<option value="" disabled selected>Loading models…</option>';
-    try {
-      const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models?key=' + encodeURIComponent(apiKey));
-      const data = await res.json();
-      if (data.error) throw new Error(data.error.message);
-      const validModels = (data.models || []).filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.indexOf('generateContent') !== -1);
-      if (!validModels.length) throw new Error('generateContent ကို support လုပ်တဲ့ model မတွေ့ပါ။');
-      modelSelect.innerHTML = validModels.map(m => '<option value="' + m.name + '">' + (m.displayName || m.name) + '</option>').join('');
-      const flashModel = validModels.find(m => m.name.indexOf('flash') !== -1);
-      if (flashModel) modelSelect.value = flashModel.name;
-      setTranscribeStatus('Model list ရပါပြီ ✓', 'ok');
-    } catch (err) {
-      modelSelect.innerHTML = '<option value="" disabled selected>Error</option>';
-      setTranscribeStatus((err && err.message) ? err.message : 'Model list ကို ဆွဲထုတ်လို့ မရပါ။', 'err');
-    }
-    updateStartButtonState();
-  }
-
-  async function performUpload(apiKey, file, onStatus) {
-    const startRes = await fetch('https://generativelanguage.googleapis.com/upload/v1beta/files?key=' + encodeURIComponent(apiKey), {
-      method: 'POST',
-      headers: {
-        'X-Goog-Upload-Protocol': 'resumable',
-        'X-Goog-Upload-Command': 'start',
-        'X-Goog-Upload-Header-Content-Length': String(file.size),
-        'X-Goog-Upload-Header-Content-Type': file.type || 'application/octet-stream',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ file: { display_name: 'media_' + Date.now() } })
-    });
-    if (!startRes.ok) {
-      let msg = 'Upload session ကို စတင်လို့ မရပါ (HTTP ' + startRes.status + ')';
-      try { const errData = await startRes.json(); if (errData && errData.error && errData.error.message) msg = errData.error.message; } catch(e) {}
-      throw new Error(msg);
-    }
-    const uploadUrl = startRes.headers.get('X-Goog-Upload-URL');
-    if (!uploadUrl) throw new Error('Upload URL မရပါ — API Key ကို ပြန်စစ်ပေးပါ။');
-
-    if (onStatus) onStatus('Media ကို upload လုပ်နေပါသည်…');
-
-    const uploadRes = await fetch(uploadUrl, {
-      method: 'POST',
-      headers: {
-        'X-Goog-Upload-Command': 'upload, finalize',
-        'X-Goog-Upload-Offset': '0',
-        'Content-Length': String(file.size)
-      },
-      body: file
-    });
-    if (!uploadRes.ok) {
-      let msg = 'Upload မအောင်မြင်ပါ (HTTP ' + uploadRes.status + ')';
-      try { const errData = await uploadRes.json(); if (errData && errData.error && errData.error.message) msg = errData.error.message; } catch(e) {}
-      throw new Error(msg);
-    }
-    const data = await uploadRes.json();
-    if (!data || !data.file || !data.file.uri) throw new Error('Gemini file info ကို ဖတ်လို့ မရပါ။');
-    return data.file;
-  }
-
-  async function waitForActive(apiKey, uri, onStatus) {
-    const fileId = uri.split('/').pop();
-    let state = 'PROCESSING';
-    let attempts = 0;
-    while (state !== 'ACTIVE' && attempts < 60) {
-      await new Promise(r => setTimeout(r, 2000));
-      const res = await fetch('https://generativelanguage.googleapis.com/v1beta/files/' + fileId + '?key=' + encodeURIComponent(apiKey));
-      const data = await res.json();
-      state = data.state;
-      if (state === 'FAILED') throw new Error('Media processing မအောင်မြင်ပါ။');
-      if (onStatus) onStatus('Gemini က media ကို process လုပ်နေပါသည်…');
-      attempts++;
-    }
-    if (state !== 'ACTIVE') throw new Error('Processing ကြာလွန်းနေပါသည် — ပြန်စမ်းကြည့်ပါ။');
-  }
-
-  async function generateTranscript(apiKey, uri, model, srcLang, targetLang) {
-    const prompt = "System Instructions: You are a professional media analyzer and language expert.\\n" +
-      "The provided media file's audio is in [" + (srcLang === 'auto' ? 'detect automatically' : srcLang) + "].\\n\\n" +
-      "Task:\\n" +
-      "1. Listen and transcribe/translate the audio into [" + (targetLang === 'original' ? 'the original language spoken' : targetLang) + "].\\n" +
-      "2. Output a valid SRT string. Format MUST BE: HH:MM:SS,mmm (e.g., 00:00:01,500 --> 00:00:04,200). Use commas for milliseconds.\\n" +
-      "3. Provide a full plain text transcript.\\n" +
-      "4. Create a specific voice tone prompt for TTS (Text-to-Speech) that matches the mood of the audio.\\n\\n" +
-      "CRITICAL: If a target language is specified, output ONLY that language. No dual-language subtitles.\\n\\n" +
-      "JSON Structure:\\n" +
-      "{\\n  \\"srt\\": \\"strictly formatted srt string\\",\\n  \\"transcript\\": \\"full transcript text\\",\\n  \\"tts_prompt\\": \\"descriptive voice tone prompt\\"\\n}";
-
-    const res = await fetch('https://generativelanguage.googleapis.com/v1beta/' + model + ':generateContent?key=' + encodeURIComponent(apiKey), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }, { file_data: { mime_type: videoFile.type || 'application/octet-stream', file_uri: uri } }] }],
-        generationConfig: { temperature: 0.1, responseMimeType: 'application/json' }
-      })
-    });
-    const data = await res.json();
-    if (data.error) throw new Error(data.error.message);
-    const candidate = data.candidates && data.candidates[0];
-    const textResult = candidate && candidate.content && candidate.content.parts && candidate.content.parts[0] && candidate.content.parts[0].text;
-    if (!textResult) throw new Error('Gemini ကနေ output မရပါ။');
-    const parsed = JSON.parse(textResult);
-    return { srt: parsed.srt || '', transcript: parsed.transcript || '', prompt: parsed.tts_prompt || '' };
-  }
-
-  function renderResultTab(tab) {
-    currentResultTab = tab;
-    resultTabBtns.forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
-    if (tab === 'srt') transcriptText.value = generatedData.srt;
-    else if (tab === 'transcript') transcriptText.value = generatedData.transcript;
-    else transcriptText.value = generatedData.prompt;
-  }
-  resultTabBtns.forEach(btn => {
-    btn.addEventListener('click', () => renderResultTab(btn.dataset.tab));
-  });
-
-  transcribeBtn.addEventListener('click', async () => {
-    const apiKey = (geminiApiKeyInput.value || '').trim();
-    if (!apiKey) {
-      setTranscribeStatus('Gemini API Key ထည့်ပေးပါ။', 'err');
-      geminiApiKeyInput.focus();
-      return;
-    }
-    if (!videoFile) {
-      setTranscribeStatus('Video/Audio file တစ်ခု ရွေးပေးပါ။', 'err');
-      return;
-    }
-    if (!modelSelect.value) {
-      setTranscribeStatus('Model ကို ရွေးပေးပါ (Load Models နှိပ်ပါ)။', 'err');
-      return;
-    }
-
-    const model = modelSelect.value;
-    const srcLang = sourceLanguageSelect.value;
-    const targetLang = targetLanguageSelect.value;
-
-    transcribeBtn.disabled = true;
-    transcribeSpinner.classList.add('on');
-    transcribeLabel.textContent = 'Processing…';
-    transcriptOutput.classList.remove('show');
-    setTranscribeStatus('Media ကို upload လုပ်နေပါသည်…', '');
-
-    try {
-      const fileInfo = await performUpload(apiKey, videoFile, (msg) => setTranscribeStatus(msg, ''));
-      setTranscribeStatus('AI Analyzing Content…', '');
-      await waitForActive(apiKey, fileInfo.uri, (msg) => setTranscribeStatus(msg, ''));
-      setTranscribeStatus(targetLang === 'original' ? ('Transcribing (' + srcLang + ')…') : ('Translating ' + srcLang + ' to ' + targetLang + '…'), '');
-      generatedData = await generateTranscript(apiKey, fileInfo.uri, model, srcLang, targetLang);
-      renderResultTab('srt');
-      transcriptOutput.classList.add('show');
-      setTranscribeStatus('ပြီးပါပြီ ✓', 'ok');
-    } catch (e) {
-      setTranscribeStatus(e && e.message ? e.message : 'Processing မအောင်မြင်ပါ။', 'err');
-    } finally {
-      transcribeBtn.disabled = false;
-      transcribeSpinner.classList.remove('on');
-      transcribeLabel.textContent = 'Start processing';
-      updateStartButtonState();
-    }
-  });
-
-  copyTranscriptBtn.addEventListener('click', async () => {
-    if (!transcriptText.value) return;
-    try {
-      await navigator.clipboard.writeText(transcriptText.value);
-      const original = copyTranscriptBtn.textContent;
-      copyTranscriptBtn.textContent = 'Copied ✓';
-      setTimeout(() => { copyTranscriptBtn.textContent = original; }, 1500);
-    } catch (e) {
-      transcriptText.select();
-      document.execCommand('copy');
-    }
-  });
-
-  downloadTranscriptBtn.addEventListener('click', () => {
-    const content = transcriptText.value;
-    if (!content) return;
-    const ext = currentResultTab === 'srt' ? '.srt' : (currentResultTab === 'transcript' ? '.txt' : '_prompt.txt');
-    const blob = new Blob([content], { type: 'text/plain' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = (videoFile ? videoFile.name.split('.')[0] : 'output') + '_' + currentResultTab + ext;
-    a.click();
-    URL.revokeObjectURL(a.href);
   });
 })();
 </script>
@@ -4915,7 +4500,7 @@ function getProfileHtml() {
       flex-shrink: 0; font-size: 10px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase;
       padding: 3px 9px; border-radius: 10px; white-space: nowrap;
     }
-    .req-badge.completed { background: #fdf6e0; color: #b8860b; }
+    .req-badge.completed { background: #eaf7ee; color: #1a7a44; }
     .req-badge.failed { background: #fdeceb; color: #c0392b; }
     .req-badge.cancelled { background: #f0f0ee; color: #888; }
     .req-badge.pending { background: #fff6e0; color: #a17a1c; }
