@@ -219,15 +219,7 @@ function json(data, status, corsHeaders) {
 
 function html(body) {
   return new Response(body, {
-    headers: {
-      'Content-Type': 'text/html; charset=utf-8',
-      // Telegram Mini App ရဲ့ in-app WebView (နှင့် browser/CDN တစ်ခုခု) က ဒီ HTML ကို
-      // cache လုပ်ထားခဲ့ရင် Worker ကို အသစ် deploy လုပ်ပြီးသားပင် ဖြစ်ငြားလည်း user
-      // ဘက်မှာ code အဟောင်းကိုပဲ ဆက်တွေ့နေရနိုင်ပါတယ် — ဒါကြောင့် ဒီ page တွေကို
-      // လုံးဝ cache မလုပ်ဖို့ တိတိကျကျ ညွှန်ကြားထားပါသည်
-      'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
-      'Pragma': 'no-cache',
-    },
+    headers: { 'Content-Type': 'text/html; charset=utf-8' },
   });
 }
 
@@ -1781,13 +1773,10 @@ async function handleGenerateStart(request, env, corsHeaders) {
   }
   // Voice cloning အတွက် upload လုပ်လိုက်တဲ့ reference audio ဟုတ်/မဟုတ် magic-byte နဲ့
   // server ဘက်ကနေ တကယ်စစ်ပါသည် — client က "audio" လို့ ဆိုတာနဲ့ မယုံပါ
-  // (Limit ကို 20MB ကနေ 8MB ကို လျှော့ချထားသည် — file ကြီးလွန်းရင် base64 decode +
-  // RunPod payload ကြီးလွန်းလို့ Cloudflare timeout ဖြစ်ပြီး client မှာ JSON parse
-  // error ("Unexpected token '<'") ပေါ်လာတတ်တဲ့ ပြဿနာကို လျော့ချရန်)
   if (refAudioBase64) {
-    const refBytes = safeDecodeBase64(refAudioBase64, 8 * 1024 * 1024);
+    const refBytes = safeDecodeBase64(refAudioBase64, 20 * 1024 * 1024);
     if (!refBytes) {
-      return json({ error: 'Reference audio file သိပ်ကြီးလွန်း (max 8MB) သို့မဟုတ် ပျက်နေပါသည်' }, 400, corsHeaders);
+      return json({ error: 'Reference audio file သိပ်ကြီးလွန်း (သို့) ပျက်နေပါသည်' }, 400, corsHeaders);
     }
     if (!looksLikeAudio(refBytes)) {
       return json({ error: 'Reference audio file format မှားနေပါသည်' }, 400, corsHeaders);
@@ -2165,9 +2154,9 @@ async function handleApiV1Generate(request, env, corsHeaders) {
     return json({ error: 'RunPod environment variables missing' }, 500, corsHeaders);
   }
   if (refAudioBase64) {
-    const refBytes = safeDecodeBase64(refAudioBase64, 8 * 1024 * 1024);
+    const refBytes = safeDecodeBase64(refAudioBase64, 20 * 1024 * 1024);
     if (!refBytes) {
-      return json({ error: 'Reference audio file သိပ်ကြီးလွန်း (max 8MB) သို့မဟုတ် ပျက်နေပါသည်' }, 400, corsHeaders);
+      return json({ error: 'Reference audio file သိပ်ကြီးလွန်း (သို့) ပျက်နေပါသည်' }, 400, corsHeaders);
     }
     if (!looksLikeAudio(refBytes)) {
       return json({ error: 'Reference audio file format မှားနေပါသည်' }, 400, corsHeaders);
@@ -3468,7 +3457,6 @@ function getStudioHtml() {
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Ko Paing 🎙️ AI Voice Studio</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<script src="//libtl.com/sdk.js" data-zone="11602199" data-sdk="show_11602199"></script>
 ${FAVICON}
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;1,9..144,500&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap');
@@ -3812,7 +3800,6 @@ ${FAVICON}
             <div class="output-head">Take rendered — <b id="outputMeta">—</b></div>
             <audio id="audioPlayer" controls></audio>
             <div class="output-foot">
-              <button class="download" id="downloadAudioBtn" type="button">Download</button>
               <button class="download" id="sendTelegramBtn" type="button">Telegram ကို ပို့ပါ</button>
             </div>
           </div>
@@ -3967,7 +3954,6 @@ ${FAVICON}
   const audioPlayer   = $('audioPlayer');
   const outputMeta     = $('outputMeta');
   const sendTelegramBtn = $('sendTelegramBtn');
-  const downloadAudioBtn = $('downloadAudioBtn');
 
   const voiceTypeSelect = $('voiceTypeSelect');
   const voiceTypeWrap = $('voiceTypeWrap');
@@ -4082,15 +4068,6 @@ ${FAVICON}
       setStatus('That file doesn\\'t look like audio.', 'err');
       return;
     }
-    // Reference audio ကြီးလွန်းရင် server ဘက်မှာ decode/RunPod payload ကြီးလွန်းလို့
-    // Cloudflare timeout ဖြစ်ပြီး "Unexpected token '<'" error ပေါ်လာတတ်ပါတယ် —
-    // ဒါကြောင့် upload မတင်ခင် client ဘက်ကတည်းက size ကို ကန့်သတ်ထားပါသည်
-    // (Voice cloning အတွက် ~30-60 စက္ကန့်စာလောက်ရင် လုံလောက်ပါသည်)
-    const MAX_REF_AUDIO_BYTES = 8 * 1024 * 1024;
-    if (file.size > MAX_REF_AUDIO_BYTES) {
-      setStatus('Reference audio ဟာ 8MB ထက် ကြီးနေပါသည် — ~30-60 စက္ကန့်စာလောက် တိုတိုသေးတဲ့ file ဖြင့် စမ်းကြည့်ပါ (ကြီးလွန်းရင် server timeout ဖြစ်တတ်ပါသည်)။', 'err');
-      return;
-    }
     const reader = new FileReader();
     reader.onload = () => {
       refAudioBase64 = reader.result.split(',')[1];
@@ -4135,22 +4112,6 @@ ${FAVICON}
     generateLabel.textContent = isBusy ? 'Generating…' : 'Generate speech';
   }
 
-  // Server ဘက် (Cloudflare) ခဏတာ overload/timeout ဖြစ်ရင် JSON အစား HTML error
-  // page (<!DOCTYPE...) ပြန်လာတတ်ပါတယ် — .json() ကို တိုက်ရိုက်ခေါ်ရင် "Unexpected
-  // token '<'" ဆိုပြီး crash ဖြစ်တတ်လို့ ဒီ helper က အရင် text() နဲ့ဖတ်ပြီး JSON.parse
-  // ကို try/catch လုပ်ပါတယ် — parse မရရင် ဘယ်လို HTML/error ပြန်ခဲ့လဲဆိုတာ debug လုပ်နိုင်ဖို့
-  // response ရဲ့ HTTP status + content ရဲ့ အစပိုင်းကို error message ထဲမှာ ထည့်ပြပါသည်
-  async function safeParseJson(res) {
-    const text = await res.text();
-    try {
-      return JSON.parse(text);
-    } catch (e) {
-      const snippet = text.slice(0, 200).replace(/\\s+/g, ' ').trim();
-      throw new Error('Server ကနေ JSON မဟုတ်တဲ့ အဖြေ ပြန်ခဲ့ပါသည် (HTTP ' + res.status + '): ' + (snippet || '(empty response)'));
-    }
-  }
-
-
   generateBtn.addEventListener('click', async () => {
     if (polling || !tgUser) return;
 
@@ -4178,7 +4139,7 @@ ${FAVICON}
           voicePresetId: presetVoiceSelect.value || undefined
         })
       });
-      const startData = await safeParseJson(startRes);
+      const startData = await startRes.json();
       if (!startRes.ok || !startData.success) {
         throw new Error(startData.error || 'Request failed');
       }
@@ -4211,7 +4172,7 @@ ${FAVICON}
         headers:{ 'Content-Type':'application/json' },
         body: JSON.stringify({ initData: currentInitData(), jobId })
       });
-      const data = await safeParseJson(res);
+      const data = await res.json();
 
       if (data.status === 'IN_QUEUE') {
         setStatus('Waiting in queue…');
@@ -4249,40 +4210,6 @@ ${FAVICON}
     output.classList.add('show');
     output.scrollIntoView({ behavior:'smooth', block:'nearest' });
   }
-
-  downloadAudioBtn.addEventListener('click', async () => {
-    if (!lastAudioBase64) return;
-    const original = downloadAudioBtn.textContent;
-    downloadAudioBtn.disabled = true;
-    downloadAudioBtn.textContent = 'ပြင်ဆင်နေသည်…';
-    try {
-      const res = await fetch('/api/generate/save-audio', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ initData: currentInitData(), audioBase64: lastAudioBase64, format: lastAudioFormat })
-      });
-      const data = await res.json();
-      if (res.ok && data.success && data.url) {
-        const fullUrl = location.origin + data.url;
-        // Telegram Mini App ရဲ့ built-in webview ထဲမှာ file download prompt မထွက်တတ်လို့
-        // system browser (Chrome) ထဲမှာ တိုက်ရိုက်ဖွင့်ပြီး Content-Disposition header
-        // အရ Chrome ရဲ့ built-in download ကို trigger လုပ်ပါသည်
-        if (tg && typeof tg.openLink === 'function') {
-          tg.openLink(fullUrl, { try_instant_view: false });
-        } else {
-          window.open(fullUrl, '_blank');
-        }
-        setStatus('Chrome ထဲမှာ Download စတင်ပါပြီ ✓', 'ok');
-      } else {
-        setStatus(data.error || 'Download link ပြင်ဆင်လို့ မရပါ။', 'err');
-      }
-    } catch (e) {
-      setStatus('Network error — Download link ပြင်ဆင်လို့ မရပါ။', 'err');
-    } finally {
-      downloadAudioBtn.disabled = false;
-      downloadAudioBtn.textContent = original;
-    }
-  });
 
   sendTelegramBtn.addEventListener('click', async () => {
     if (!lastAudioBase64 || !tgUser || !tgUser.id) return;
@@ -4545,18 +4472,6 @@ ${FAVICON}
     btn.addEventListener('click', () => renderResultTab(btn.dataset.tab));
   });
 
-  // Monetag Rewarded Interstitial — Video Transcript ပြီးဆုံးတဲ့အချိန်မှာ ready
-  // ဖြစ်နေတဲ့ ad ကို ပြပါသည် (libtl.com/sdk.js ကနေ window.show_11602199 ကို
-  // <head> ထဲက script tag က ပေးထားပါသည်)
-  function showTranscriptRewardAd() {
-    if (typeof window.show_11602199 !== 'function') return;
-    window.show_11602199().then(() => {
-      // user က ad ကို အဆုံးအထိ ကြည့်ပြီးပါပြီ
-    }).catch(() => {
-      // ad မပြနိုင်ခဲ့ရင် သို့မဟုတ် user ကျော်လိုက်ရင် transcript ကိုတော့ ပုံမှန်အတိုင်း ဆက်သုံးနိုင်ပါသည်
-    });
-  }
-
   transcribeBtn.addEventListener('click', async () => {
     const apiKey = (geminiApiKeyInput.value || '').trim();
     if (!apiKey) {
@@ -4592,7 +4507,6 @@ ${FAVICON}
       renderResultTab('srt');
       transcriptOutput.classList.add('show');
       setTranscribeStatus('ပြီးပါပြီ ✓', 'ok');
-      showTranscriptRewardAd();
     } catch (e) {
       setTranscribeStatus(e && e.message ? e.message : 'Processing မအောင်မြင်ပါ။', 'err');
     } finally {
