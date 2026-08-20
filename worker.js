@@ -219,7 +219,15 @@ function json(data, status, corsHeaders) {
 
 function html(body) {
   return new Response(body, {
-    headers: { 'Content-Type': 'text/html; charset=utf-8' },
+    headers: {
+      'Content-Type': 'text/html; charset=utf-8',
+      // Telegram Mini App ရဲ့ in-app WebView (နှင့် browser/CDN တစ်ခုခု) က ဒီ HTML ကို
+      // cache လုပ်ထားခဲ့ရင် Worker ကို အသစ် deploy လုပ်ပြီးသားပင် ဖြစ်ငြားလည်း user
+      // ဘက်မှာ code အဟောင်းကိုပဲ ဆက်တွေ့နေရနိုင်ပါတယ် — ဒါကြောင့် ဒီ page တွေကို
+      // လုံးဝ cache မလုပ်ဖို့ တိတိကျကျ ညွှန်ကြားထားပါသည်
+      'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+      'Pragma': 'no-cache',
+    },
   });
 }
 
