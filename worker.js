@@ -896,12 +896,10 @@ async function handlePlansList(request, env, corsHeaders) {
 
   // Pay-As-You-Go top-up (Developer API) အတွက် Admin သတ်မှတ်ထားတဲ့ minimum amount + credit rate
   // ကို purchase page က ဒီတစ်ခေါ်ထဲမှာပဲ ရအောင် ထည့်ပေးလိုက်ပါသည် (round-trip တစ်ခု ချွေတာနိုင်ရန်)
-  // Default: 10000 MMK = 35000 credits, 79 THB = 35000 credits
   const minTopupAmount = Number(await getSetting(env, 'min_topup_amount', '1000')) || 0;
-  const paygCreditRate = Number(await getSetting(env, 'payg_credit_rate', '3.5')) || 3.5;
-  const paygCreditRateTh = Number(await getSetting(env, 'payg_credit_rate_th', '443.0379746835443')) || 443.0379746835443;
+  const paygCreditRate = Number(await getSetting(env, 'payg_credit_rate', '1')) || 1;
 
-  return json({ success: true, plans: results, minTopupAmount, paygCreditRate, paygCreditRateTh }, 200, corsHeaders);
+  return json({ success: true, plans: results, minTopupAmount, paygCreditRate }, 200, corsHeaders);
 }
 
 async function handlePaymentMethodsList(request, env, corsHeaders) {
@@ -1028,8 +1026,7 @@ async function handleAdminSettingsGet(request, env, corsHeaders) {
   const referralBonusReferrer = await getSetting(env, 'referral_bonus_referrer', '0');
   const referralBonusReferred = await getSetting(env, 'referral_bonus_referred', '0');
   const minTopupAmount = await getSetting(env, 'min_topup_amount', '1000');
-  const paygCreditRate = await getSetting(env, 'payg_credit_rate', '3.5');
-  const paygCreditRateTh = await getSetting(env, 'payg_credit_rate_th', '443.0379746835443');
+  const paygCreditRate = await getSetting(env, 'payg_credit_rate', '1');
   return json(
     {
       success: true,
@@ -1037,8 +1034,7 @@ async function handleAdminSettingsGet(request, env, corsHeaders) {
       referralBonusReferrer: parseInt(referralBonusReferrer, 10) || 0,
       referralBonusReferred: parseInt(referralBonusReferred, 10) || 0,
       minTopupAmount: parseInt(minTopupAmount, 10) || 0,
-      paygCreditRate: parseFloat(paygCreditRate) || 3.5,
-      paygCreditRateTh: parseFloat(paygCreditRateTh) || 443.0379746835443,
+      paygCreditRate: parseFloat(paygCreditRate) || 1,
     },
     200,
     corsHeaders
@@ -1064,10 +1060,7 @@ async function handleAdminSettingsUpdate(request, env, corsHeaders) {
     await setSetting(env, 'min_topup_amount', String(parseInt(body.minTopupAmount, 10) || 0));
   }
   if (body.paygCreditRate !== undefined) {
-    await setSetting(env, 'payg_credit_rate', String(parseFloat(body.paygCreditRate) || 3.5));
-  }
-  if (body.paygCreditRateTh !== undefined) {
-    await setSetting(env, 'payg_credit_rate_th', String(parseFloat(body.paygCreditRateTh) || 443.0379746835443));
+    await setSetting(env, 'payg_credit_rate', String(parseFloat(body.paygCreditRate) || 1));
   }
 
   return json({ success: true }, 200, corsHeaders);
@@ -1238,7 +1231,7 @@ async function handlePurchaseSubmit(request, env, corsHeaders) {
 // သက်တမ်း (expiry) မရှိပါ (Plan credits (users.credits) နဲ့ ခွဲထားပါသည်)
 async function handlePaygTopupSubmit(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
-  const { initData, amount, slipImageBase64, country } = body;
+  const { initData, amount, slipImageBase64 } = body;
 
   const userId = await getVerifiedTelegramUserId(initData, env);
   if (!userId) {
@@ -1272,11 +1265,7 @@ async function handlePaygTopupSubmit(request, env, corsHeaders) {
     return json({ error: 'Slip image format မှားနေပါသည် (JPEG/PNG/WEBP ဖြစ်ရပါမည်)' }, 400, corsHeaders);
   }
 
-  // Currency အလိုက် rate ကွဲပြားပါသည် — 10000 MMK = 35000 credits, 79 THB = 35000 credits
-  const isTh = country === 'TH';
-  const rate = isTh
-    ? (Number(await getSetting(env, 'payg_credit_rate_th', '443.0379746835443')) || 443.0379746835443)
-    : (Number(await getSetting(env, 'payg_credit_rate', '3.5')) || 3.5);
+  const rate = Number(await getSetting(env, 'payg_credit_rate', '1')) || 1;
   const credits = Math.floor(amountNum * rate);
 
   await env.DB.prepare(
@@ -1493,7 +1482,7 @@ const MULTI_JOB_PREFIX = 'multi:'; // compound jobId (RunPod job id များ
 // အချိန် (COMPLETED ဖြစ်ကြောင်း server က confirm လုပ်တဲ့ချိန်) ထိကြာချိန်ကို
 // (client ဘက်ကို လုံးဝ မယုံဘဲ) request_logs.created_at ကို authoritative "start" time
 // အဖြစ်ယူပြီး server ဘက်ကနေသာ တွက်ချက်ပါသည်။
-const PAYG_RATE_PER_SECOND = 12; // 1 စက္ကန့် = ၁၂ credits (users.payg_credits ထဲကနေ နုတ်ယူမည်)
+const PAYG_RATE_PER_SECOND = 5; // 1 စက္ကန့် = ၅ကျပ် (= ၅ credits, users.payg_credits ထဲကနေ နုတ်ယူမည်)
 const PAYG_MAX_BILLABLE_SECONDS = 600; // RunPod job တစ်ခု ကျောရှည်/ရပ်တန့်နေခဲ့လျှင်တောင် အများဆုံး ၁၀ မိနစ်စာသာ ကောက်ခံမည် (runaway cost ကာကွယ်ရန်)
 
 // Multi-voice tag ("M:"/"F:"/"C:") continuity ကို ထိန်းသိမ်းလျက် text ကို line boundary
@@ -2444,9 +2433,13 @@ async function handleSendTelegramAudio(request, env, corsHeaders) {
   const fmt = format || 'wav';
   const mime = fmt === 'mp3' ? 'audio/mpeg' : `audio/${fmt}`;
 
+  const binary = atob(audioBase64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
   const form = new FormData();
   form.append('chat_id', userId);
-  form.append('audio', new Blob([sendAudioBytes], { type: mime }), `voice-output.${fmt}`);
+  form.append('audio', new Blob([bytes], { type: mime }), `voice-output.${fmt}`);
   form.append('caption', 'Ko Paing AI Voice Studio 🎙️');
 
   const tgRes = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendAudio`, {
@@ -3237,12 +3230,8 @@ function getAdminDashboardHtml() {
           <div class="row2">
             <div class="field"><label>Minimum Top-up Amount</label>
               <input id="minTopupAmount" type="number" value="\${data.minTopupAmount || 0}"></div>
-          </div>
-          <div class="row2">
-            <div class="field"><label>Credit Rate — MMK (credits per 1 Kyat)</label>
-              <input id="paygCreditRate" type="number" step="0.0001" value="\${data.paygCreditRate || 3.5}"></div>
-            <div class="field"><label>Credit Rate — THB (credits per 1 Baht)</label>
-              <input id="paygCreditRateTh" type="number" step="0.0001" value="\${data.paygCreditRateTh || 443.0379746835443}"></div>
+            <div class="field"><label>Credit Rate (credits per 1 unit of amount)</label>
+              <input id="paygCreditRate" type="number" step="0.01" value="\${data.paygCreditRate || 1}"></div>
           </div>
           <button class="btn" onclick="savePaygSettings()">Save</button>
           <div class="msg" id="paygMsg"></div>
@@ -3272,9 +3261,8 @@ function getAdminDashboardHtml() {
     async function savePaygSettings() {
       const minTopupAmount = document.getElementById('minTopupAmount').value;
       const paygCreditRate = document.getElementById('paygCreditRate').value;
-      const paygCreditRateTh = document.getElementById('paygCreditRateTh').value;
       const msg = document.getElementById('paygMsg');
-      const { ok, data } = await api('/api/admin/settings/update', { minTopupAmount, paygCreditRate, paygCreditRateTh });
+      const { ok, data } = await api('/api/admin/settings/update', { minTopupAmount, paygCreditRate });
       msg.textContent = ok && data.success ? 'Saved!' : (data.error || 'Failed');
       msg.className = 'msg ' + (ok && data.success ? 'ok' : 'err');
     }
@@ -4434,11 +4422,11 @@ ${FAVICON}
       "Task:\\n" +
       "1. Listen and transcribe/translate the audio into [" + (targetLang === 'original' ? 'the original language spoken' : targetLang) + "].\\n" +
       "2. Output a valid SRT string. Format MUST BE: HH:MM:SS,mmm (e.g., 00:00:01,500 --> 00:00:04,200). Use commas for milliseconds.\\n" +
-      "3. Provide a full plain text transcript. Within this transcript ONLY (not the SRT), insert inline pause markers in the exact format [pause:X.X] (X.X = pause duration in seconds, one decimal place, matching the actual timing heard in the video) at every point where there is a silent pause of about 0.3 seconds or longer between words, phrases, or sentences.\\n" +
+      "3. Provide a full plain text transcript.\\n" +
       "4. Create a specific voice tone prompt for TTS (Text-to-Speech) that matches the mood of the audio.\\n\\n" +
       "CRITICAL: If a target language is specified, output ONLY that language. No dual-language subtitles.\\n\\n" +
       "JSON Structure:\\n" +
-      "{\\n  \\"srt\\": \\"strictly formatted srt string\\",\\n  \\"transcript\\": \\"full transcript text with inline [pause:X.X] markers\\",\\n  \\"tts_prompt\\": \\"descriptive voice tone prompt\\"\\n}";
+      "{\\n  \\"srt\\": \\"strictly formatted srt string\\",\\n  \\"transcript\\": \\"full transcript text\\",\\n  \\"tts_prompt\\": \\"descriptive voice tone prompt\\"\\n}";
 
     const res = await fetch('https://generativelanguage.googleapis.com/v1beta/' + model + ':generateContent?key=' + encodeURIComponent(apiKey), {
       method: 'POST',
