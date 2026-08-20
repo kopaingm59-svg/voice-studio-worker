@@ -1773,10 +1773,13 @@ async function handleGenerateStart(request, env, corsHeaders) {
   }
   // Voice cloning အတွက် upload လုပ်လိုက်တဲ့ reference audio ဟုတ်/မဟုတ် magic-byte နဲ့
   // server ဘက်ကနေ တကယ်စစ်ပါသည် — client က "audio" လို့ ဆိုတာနဲ့ မယုံပါ
+  // (Limit ကို 20MB ကနေ 8MB ကို လျှော့ချထားသည် — file ကြီးလွန်းရင် base64 decode +
+  // RunPod payload ကြီးလွန်းလို့ Cloudflare timeout ဖြစ်ပြီး client မှာ JSON parse
+  // error ("Unexpected token '<'") ပေါ်လာတတ်တဲ့ ပြဿနာကို လျော့ချရန်)
   if (refAudioBase64) {
-    const refBytes = safeDecodeBase64(refAudioBase64, 20 * 1024 * 1024);
+    const refBytes = safeDecodeBase64(refAudioBase64, 8 * 1024 * 1024);
     if (!refBytes) {
-      return json({ error: 'Reference audio file သိပ်ကြီးလွန်း (သို့) ပျက်နေပါသည်' }, 400, corsHeaders);
+      return json({ error: 'Reference audio file သိပ်ကြီးလွန်း (max 8MB) သို့မဟုတ် ပျက်နေပါသည်' }, 400, corsHeaders);
     }
     if (!looksLikeAudio(refBytes)) {
       return json({ error: 'Reference audio file format မှားနေပါသည်' }, 400, corsHeaders);
@@ -2154,9 +2157,9 @@ async function handleApiV1Generate(request, env, corsHeaders) {
     return json({ error: 'RunPod environment variables missing' }, 500, corsHeaders);
   }
   if (refAudioBase64) {
-    const refBytes = safeDecodeBase64(refAudioBase64, 20 * 1024 * 1024);
+    const refBytes = safeDecodeBase64(refAudioBase64, 8 * 1024 * 1024);
     if (!refBytes) {
-      return json({ error: 'Reference audio file သိပ်ကြီးလွန်း (သို့) ပျက်နေပါသည်' }, 400, corsHeaders);
+      return json({ error: 'Reference audio file သိပ်ကြီးလွန်း (max 8MB) သို့မဟုတ် ပျက်နေပါသည်' }, 400, corsHeaders);
     }
     if (!looksLikeAudio(refBytes)) {
       return json({ error: 'Reference audio file format မှားနေပါသည်' }, 400, corsHeaders);
@@ -4071,6 +4074,15 @@ ${FAVICON}
       setStatus('That file doesn\\'t look like audio.', 'err');
       return;
     }
+    // Reference audio ကြီးလွန်းရင် server ဘက်မှာ decode/RunPod payload ကြီးလွန်းလို့
+    // Cloudflare timeout ဖြစ်ပြီး "Unexpected token '<'" error ပေါ်လာတတ်ပါတယ် —
+    // ဒါကြောင့် upload မတင်ခင် client ဘက်ကတည်းက size ကို ကန့်သတ်ထားပါသည်
+    // (Voice cloning အတွက် ~30-60 စက္ကန့်စာလောက်ရင် လုံလောက်ပါသည်)
+    const MAX_REF_AUDIO_BYTES = 8 * 1024 * 1024;
+    if (file.size > MAX_REF_AUDIO_BYTES) {
+      setStatus('Reference audio ဟာ 8MB ထက် ကြီးနေပါသည် — ~30-60 စက္ကန့်စာလောက် တိုတိုသေးတဲ့ file ဖြင့် စမ်းကြည့်ပါ (ကြီးလွန်းရင် server timeout ဖြစ်တတ်ပါသည်)။', 'err');
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => {
       refAudioBase64 = reader.result.split(',')[1];
@@ -4118,16 +4130,18 @@ ${FAVICON}
   // Server ဘက် (Cloudflare) ခဏတာ overload/timeout ဖြစ်ရင် JSON အစား HTML error
   // page (<!DOCTYPE...) ပြန်လာတတ်ပါတယ် — .json() ကို တိုက်ရိုက်ခေါ်ရင် "Unexpected
   // token '<'" ဆိုပြီး crash ဖြစ်တတ်လို့ ဒီ helper က အရင် text() နဲ့ဖတ်ပြီး JSON.parse
-  // ကို try/catch လုပ်ပါတယ် — parse မရရင် ရှင်းရှင်းလင်းလင်း error message ပြန်ပေးပါတယ်
-  // (Voice Clone မှာ reference audio ကြီးလို့ server ချိန်ကြာတတ်တဲ့အခါ ဒီလို ဖြစ်တတ်ပါတယ်)
+  // ကို try/catch လုပ်ပါတယ် — parse မရရင် ဘယ်လို HTML/error ပြန်ခဲ့လဲဆိုတာ debug လုပ်နိုင်ဖို့
+  // response ရဲ့ HTTP status + content ရဲ့ အစပိုင်းကို error message ထဲမှာ ထည့်ပြပါသည်
   async function safeParseJson(res) {
     const text = await res.text();
     try {
       return JSON.parse(text);
     } catch (e) {
-      throw new Error('Server ကနေ အဖြေ ဖတ်လို့ မရပါ — server ခေတ္တ busy/timeout ဖြစ်နေနိုင်ပါသည် (voice clone အတွက် reference audio ကြီးရင် ပိုဖြစ်တတ်ပါသည်)။ ခဏနေမှ ထပ်ကြိုးစားပါ။');
+      const snippet = text.slice(0, 200).replace(/\\s+/g, ' ').trim();
+      throw new Error('Server ကနေ JSON မဟုတ်တဲ့ အဖြေ ပြန်ခဲ့ပါသည် (HTTP ' + res.status + '): ' + (snippet || '(empty response)'));
     }
   }
+
 
   generateBtn.addEventListener('click', async () => {
     if (polling || !tgUser) return;
