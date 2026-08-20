@@ -2444,13 +2444,9 @@ async function handleSendTelegramAudio(request, env, corsHeaders) {
   const fmt = format || 'wav';
   const mime = fmt === 'mp3' ? 'audio/mpeg' : `audio/${fmt}`;
 
-  const binary = atob(audioBase64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-
   const form = new FormData();
   form.append('chat_id', userId);
-  form.append('audio', new Blob([bytes], { type: mime }), `voice-output.${fmt}`);
+  form.append('audio', new Blob([sendAudioBytes], { type: mime }), `voice-output.${fmt}`);
   form.append('caption', 'Ko Paing AI Voice Studio 🎙️');
 
   const tgRes = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendAudio`, {
