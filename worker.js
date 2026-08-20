@@ -4115,6 +4115,20 @@ ${FAVICON}
     generateLabel.textContent = isBusy ? 'Generating…' : 'Generate speech';
   }
 
+  // Server ဘက် (Cloudflare) ခဏတာ overload/timeout ဖြစ်ရင် JSON အစား HTML error
+  // page (<!DOCTYPE...) ပြန်လာတတ်ပါတယ် — .json() ကို တိုက်ရိုက်ခေါ်ရင် "Unexpected
+  // token '<'" ဆိုပြီး crash ဖြစ်တတ်လို့ ဒီ helper က အရင် text() နဲ့ဖတ်ပြီး JSON.parse
+  // ကို try/catch လုပ်ပါတယ် — parse မရရင် ရှင်းရှင်းလင်းလင်း error message ပြန်ပေးပါတယ်
+  // (Voice Clone မှာ reference audio ကြီးလို့ server ချိန်ကြာတတ်တဲ့အခါ ဒီလို ဖြစ်တတ်ပါတယ်)
+  async function safeParseJson(res) {
+    const text = await res.text();
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      throw new Error('Server ကနေ အဖြေ ဖတ်လို့ မရပါ — server ခေတ္တ busy/timeout ဖြစ်နေနိုင်ပါသည် (voice clone အတွက် reference audio ကြီးရင် ပိုဖြစ်တတ်ပါသည်)။ ခဏနေမှ ထပ်ကြိုးစားပါ။');
+    }
+  }
+
   generateBtn.addEventListener('click', async () => {
     if (polling || !tgUser) return;
 
@@ -4142,7 +4156,7 @@ ${FAVICON}
           voicePresetId: presetVoiceSelect.value || undefined
         })
       });
-      const startData = await startRes.json();
+      const startData = await safeParseJson(startRes);
       if (!startRes.ok || !startData.success) {
         throw new Error(startData.error || 'Request failed');
       }
@@ -4175,7 +4189,7 @@ ${FAVICON}
         headers:{ 'Content-Type':'application/json' },
         body: JSON.stringify({ initData: currentInitData(), jobId })
       });
-      const data = await res.json();
+      const data = await safeParseJson(res);
 
       if (data.status === 'IN_QUEUE') {
         setStatus('Waiting in queue…');
