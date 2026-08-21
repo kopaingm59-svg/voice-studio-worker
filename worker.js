@@ -2419,9 +2419,21 @@ async function handleSendTelegramAudio(request, env, corsHeaders) {
   if (!audioBase64) {
     return json({ error: 'Missing audioBase64' }, 400, corsHeaders);
   }
-  const sendAudioBytes = safeDecodeBase64(audioBase64, 30 * 1024 * 1024);
-  if (!sendAudioBytes) {
-    return json({ error: 'Audio file သိပ်ကြီးလွန်းပါသည် (သို့) format မမှန်ကန်ပါ' }, 413, corsHeaders);
+  // Telegram Bot API ရဲ့ sendAudio upload limit က 50MB ဖြစ်ပါသည် — 48MB ကို margin
+  // အနေနဲ့ ထားပါသည်။ decode failure (base64 ပျက်) နဲ့ size-exceeded ကို error message
+  // သီးခြားစီ ခွဲပြထားပါသည် (ယခင်က နှစ်ခုစလုံးကို message တစ်ခုတည်းအဖြစ် ရောပြပြီး
+  // အစစ်အမှန် အကြောင်းရင်းကို ခွဲမသိနိုင်ခဲ့ပါ)
+  let sendAudioBytes;
+  try {
+    sendAudioBytes = base64ToBytes(audioBase64);
+  } catch (e) {
+    return json({ error: 'Audio data ကို decode လုပ်လို့ မရပါ (base64 format ပျက်နေပါသည်)' }, 400, corsHeaders);
+  }
+  const TELEGRAM_MAX_AUDIO_BYTES = 48 * 1024 * 1024;
+  if (sendAudioBytes.length > TELEGRAM_MAX_AUDIO_BYTES) {
+    return json({
+      error: `Audio file သိပ်ကြီးလွန်းပါသည် (${(sendAudioBytes.length / (1024 * 1024)).toFixed(1)}MB) — Telegram ရဲ့ 50MB ကန့်သတ်ချက်ကို ကျော်နေပါသည်`,
+    }, 413, corsHeaders);
   }
   if (!looksLikeAudio(sendAudioBytes)) {
     return json({ error: 'Audio format ကို မှတ်မိပါ — .wav/.mp3/.ogg/.m4a/.flac file ဖြစ်ရပါမည်' }, 400, corsHeaders);
@@ -2433,9 +2445,13 @@ async function handleSendTelegramAudio(request, env, corsHeaders) {
   const fmt = format || 'wav';
   const mime = fmt === 'mp3' ? 'audio/mpeg' : `audio/${fmt}`;
 
-  const binary = atob(audioBase64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  // *** fix ***: အရင်ကုတ်က validation အတွက် base64 ကို တစ်ခါ decode လုပ်ပြီးသား
+  // sendAudioBytes ကို ပယ်ချပြီး atob() နဲ့ ထပ်ခါ decode ပြန်လုပ်ခဲ့ပါတယ် — 5-minute audio
+  // လိုမှာလို base64 string ကြီးလေလေ၊ request တစ်ခုထဲမှာ CPU-heavy decode ကို ၂ ကြိမ်
+  // run ရလေဖြစ်ပြီး Worker ရဲ့ CPU time limit ကို ကျော်တတ်ခဲ့ပါတယ် (အသံတိုတို success ၊
+  // ၅ မိနစ်လို ရှည်ရှည် fail ဖြစ်ရတဲ့ အကြောင်းရင်း ဖြစ်နိုင်ပါတယ်)။ အခု decode လုပ်ပြီးသား
+  // bytes ကိုပဲ ပြန်သုံးပြီး ထပ်မံ decode မလုပ်တော့ပါ
+  const bytes = sendAudioBytes;
 
   const form = new FormData();
   form.append('chat_id', userId);
