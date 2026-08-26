@@ -3955,38 +3955,30 @@ ${FAVICON}
     output.scrollIntoView({ behavior:'smooth', block:'nearest' });
   }
 
-  downloadAudioBtn.addEventListener('click', async () => {
-    if (!lastAudioBase64 || !tgUser || !tgUser.id) return;
-    const original = downloadAudioBtn.textContent;
-    downloadAudioBtn.disabled = true;
-    downloadAudioBtn.textContent = 'ဖိုင်ပြင်ဆင်နေသည်…';
+  downloadAudioBtn.addEventListener('click', () => {
+    if (!lastAudioBase64) return;
     try {
-      // Telegram Mini App ရဲ့ in-app webview ထဲမှာ <a download> ဟာ ဖိုင်ကို တကယ် save
-      // မလုပ်တတ်ပါ — ဒါကြောင့် audio ကို server ဘက်မှာ ယာယီ save ပြီး (audio_files
-      // table, 1 ရက်အတွင်း auto-delete) Content-Disposition: attachment ပါတဲ့
-      // တိုက်ရိုက် download URL ကိုပဲ device ရဲ့ default browser (Chrome စသည်) ထဲကို
-      // tg.openLink() နဲ့ ပွင့်စေပြီး အဲဒီ browser ကနေတိုက်ရိုက် download ဆွဲစေပါသည်
-      const res = await fetch('/api/generate/save-audio', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ initData: currentInitData(), audioBase64: lastAudioBase64, format: lastAudioFormat })
-      });
-      const data = await res.json();
-      if (res.ok && data.success && data.url) {
-        const fullUrl = new URL(data.url, window.location.origin).href;
-        if (tg && typeof tg.openLink === 'function') {
-          tg.openLink(fullUrl);
-        } else {
-          window.open(fullUrl, '_blank');
-        }
-      } else {
-        setStatus(data.error || 'Download link ဖန်တီး၍ မရပါ။', 'err');
-      }
+      // Audio ကို D1 database (server) ထဲ ခဏမှ မသိမ်းတော့ပါ — D1 ရဲ့ row size
+      // ကန့်သတ်ချက် (~1-2MB) ကို ရှောင်ရှားနိုင်ပြီး audio size ဘယ်လောက်ကြီးကြီး
+      // download ရအောင် client ဘက်မှာပဲ Blob အဖြစ်ပြောင်းပြီး တိုက်ရိုက် download
+      // ဆွဲပေးပါသည် (base64 → binary → Blob → object URL → <a download> click)
+      const fmt = lastAudioFormat || 'wav';
+      const mime = fmt === 'mp3' ? 'audio/mpeg' : ('audio/' + fmt);
+      const binaryStr = atob(lastAudioBase64);
+      const bytes = new Uint8Array(binaryStr.length);
+      for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+      const blob = new Blob([bytes], { type: mime });
+      const objectUrl = URL.createObjectURL(blob);
+
+      const a = document.createElement('a');
+      a.href = objectUrl;
+      a.download = 'voice-output.' + fmt;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 30000);
     } catch (e) {
-      setStatus('Network error — Download လုပ်၍ မရပါ။', 'err');
-    } finally {
-      downloadAudioBtn.disabled = false;
-      downloadAudioBtn.textContent = original;
+      setStatus('Download လုပ်၍ မရပါ။', 'err');
     }
   });
 
