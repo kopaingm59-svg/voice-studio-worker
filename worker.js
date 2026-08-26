@@ -3508,7 +3508,7 @@ ${FAVICON}
   }
   .output-head b{ color:var(--ink); font-weight:600; }
   audio{ width:100%; height:42px; }
-  .output-foot{ display:flex; justify-content:flex-end; margin-top:16px; }
+  .output-foot{ display:flex; justify-content:flex-end; gap:10px; margin-top:16px; }
   .download{
     font-family:'IBM Plex Mono', monospace; font-size:11.5px; letter-spacing:0.06em; text-transform:uppercase;
     color:var(--ink); text-decoration:none; border:1px solid var(--ink); border-radius:var(--radius-md); padding:10px 18px;
@@ -3646,6 +3646,7 @@ ${FAVICON}
             <div class="output-head">Take rendered — <b id="outputMeta">—</b></div>
             <audio id="audioPlayer" controls></audio>
             <div class="output-foot">
+              <button class="download" id="downloadAudioBtn" type="button">⬇️ Download</button>
               <button class="download" id="sendTelegramBtn" type="button">Telegram ကို ပို့ပါ</button>
             </div>
           </div>
@@ -3696,6 +3697,7 @@ ${FAVICON}
   const audioPlayer   = $('audioPlayer');
   const outputMeta     = $('outputMeta');
   const sendTelegramBtn = $('sendTelegramBtn');
+  const downloadAudioBtn = $('downloadAudioBtn');
 
   const voiceTypeSelect = $('voiceTypeSelect');
   const voiceTypeWrap = $('voiceTypeWrap');
@@ -3952,6 +3954,41 @@ ${FAVICON}
     output.classList.add('show');
     output.scrollIntoView({ behavior:'smooth', block:'nearest' });
   }
+
+  downloadAudioBtn.addEventListener('click', async () => {
+    if (!lastAudioBase64 || !tgUser || !tgUser.id) return;
+    const original = downloadAudioBtn.textContent;
+    downloadAudioBtn.disabled = true;
+    downloadAudioBtn.textContent = 'ဖိုင်ပြင်ဆင်နေသည်…';
+    try {
+      // Telegram Mini App ရဲ့ in-app webview ထဲမှာ <a download> ဟာ ဖိုင်ကို တကယ် save
+      // မလုပ်တတ်ပါ — ဒါကြောင့် audio ကို server ဘက်မှာ ယာယီ save ပြီး (audio_files
+      // table, 1 ရက်အတွင်း auto-delete) Content-Disposition: attachment ပါတဲ့
+      // တိုက်ရိုက် download URL ကိုပဲ device ရဲ့ default browser (Chrome စသည်) ထဲကို
+      // tg.openLink() နဲ့ ပွင့်စေပြီး အဲဒီ browser ကနေတိုက်ရိုက် download ဆွဲစေပါသည်
+      const res = await fetch('/api/generate/save-audio', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData: currentInitData(), audioBase64: lastAudioBase64, format: lastAudioFormat })
+      });
+      const data = await res.json();
+      if (res.ok && data.success && data.url) {
+        const fullUrl = new URL(data.url, window.location.origin).href;
+        if (tg && typeof tg.openLink === 'function') {
+          tg.openLink(fullUrl);
+        } else {
+          window.open(fullUrl, '_blank');
+        }
+      } else {
+        setStatus(data.error || 'Download link ဖန်တီး၍ မရပါ။', 'err');
+      }
+    } catch (e) {
+      setStatus('Network error — Download လုပ်၍ မရပါ။', 'err');
+    } finally {
+      downloadAudioBtn.disabled = false;
+      downloadAudioBtn.textContent = original;
+    }
+  });
 
   sendTelegramBtn.addEventListener('click', async () => {
     if (!lastAudioBase64 || !tgUser || !tgUser.id) return;
