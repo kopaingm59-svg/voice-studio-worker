@@ -2205,7 +2205,16 @@ async function handleApiV1GenerateStatus(request, env, corsHeaders) {
 // ဆွဲမရတဲ့ ပြဿနာအတွက် - audio ကို ခဏသိမ်းပြီး real https URL တစ်ခုအနေနဲ့ ပြန်ပေးသည်။
 // ဒီ URL ကို Chrome (system browser) မှာ ဖွင့်လိုက်ရင် Content-Disposition header
 // ကြောင့် တိုက်ရိုက် download ချနိုင်ပါသည်)
+//
+// *** R2 UPDATE ***: D1 ရဲ့ row/column size limit (~1-2MB) ကို ရှောင်ရှားရန်
+// audio binary ကို D1 column ထဲ text (base64) အဖြစ် မသိမ်းတော့ဘဲ R2 bucket ထဲကို
+// binary အနေနဲ့ တိုက်ရိုက်ထည့်ပါသည်။ D1 ထဲမှာတော့ metadata (id/user/format/date)
+// ကိုသာ ခဏထားပြီး cleanup + admin lookup အတွက်သာ သုံးပါသည်။ R2 bucket binding
+// အမည်ကို wrangler.toml ထဲမှာ "AUDIO_BUCKET" အဖြစ် ထည့်ပေးရပါမည် (ဥပမာ -
+// [[r2_buckets]]\n binding = "AUDIO_BUCKET"\n bucket_name = "<your-bucket>").
 // ===========================================================================
+
+const AUDIO_R2_MAX_BYTES = 30 * 1024 * 1024; // R2 ဖြစ်တဲ့အတွက် D1 ထက်များစွာ ပိုကြီးအောင် ခွင့်ပြုနိုင်ပါသည် (30MB)
 
 async function handleSaveAudio(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
@@ -2218,13 +2227,12 @@ async function handleSaveAudio(request, env, corsHeaders) {
   if (!audioBase64) {
     return json({ error: 'Missing audioBase64' }, 400, corsHeaders);
   }
-  // storage abuse ကို ကာကွယ်ရန် — ခွင့်ပြုနိုင်တဲ့ audio size ကို ကန့်သတ်ပြီး format ကို
-  // magic-byte နဲ့ တကယ်စစ်ပါသည် (D1 database ရဲ့ column size limit ထက် မကျော်စေရန်လည်း ဖြစ်သည်
-  // — မဟုတ်ရင် "SQLITE_TOOBIG" error တက်နိုင်ပါသည်)
-  if (audioBase64.length > 1_400_000) {
-    return json({ error: 'Audio file သိပ်ကြီးလွန်းပါသည် (max ~1MB)' }, 413, corsHeaders);
+  if (!env.AUDIO_BUCKET) {
+    return json({ error: 'R2 bucket binding "AUDIO_BUCKET" ကို wrangler.toml ထဲမှာ မတွေ့ပါ။' }, 500, corsHeaders);
   }
-  const saveAudioBytes = safeDecodeBase64(audioBase64, 1_400_000);
+  // storage abuse ကို ကာကွယ်ရန် — ခွင့်ပြုနိုင်တဲ့ audio size ကို ကန့်သတ်ပြီး format ကို
+  // magic-byte နဲ့ တကယ်စစ်ပါသည်
+  const saveAudioBytes = safeDecodeBase64(audioBase64, AUDIO_R2_MAX_BYTES);
   if (!saveAudioBytes) {
     return json({ error: 'Audio file သိပ်ကြီးလွန်း (သို့) ပျက်နေပါသည်' }, 413, corsHeaders);
   }
@@ -2232,25 +2240,44 @@ async function handleSaveAudio(request, env, corsHeaders) {
     return json({ error: 'Audio file format မှားနေပါသည်' }, 400, corsHeaders);
   }
 
+  const fmt = format || 'wav';
+  const mime = fmt === 'mp3' ? 'audio/mpeg' : `audio/${fmt}`;
+  const id = crypto.randomUUID();
+  const r2Key = `audio/${id}.${fmt}`;
+
+  // Audio binary ကို R2 ထဲထည့်ပါသည် (D1 ထဲ base64 text အနေနဲ့ မသိမ်းတော့ပါ)
+  await env.AUDIO_BUCKET.put(r2Key, saveAudioBytes, {
+    httpMetadata: { contentType: mime },
+  });
+
   await env.DB.prepare(
     `CREATE TABLE IF NOT EXISTS audio_files (
       id TEXT PRIMARY KEY,
       user_id TEXT,
       format TEXT,
-      data TEXT,
+      r2_key TEXT,
       created_at TEXT
     )`
   ).run();
 
-  const id = crypto.randomUUID();
   await env.DB.prepare(
-    `INSERT INTO audio_files (id, user_id, format, data, created_at) VALUES (?1, ?2, ?3, ?4, datetime('now'))`
+    `INSERT INTO audio_files (id, user_id, format, r2_key, created_at) VALUES (?1, ?2, ?3, ?4, datetime('now'))`
   )
-    .bind(id, userId, format || 'wav', audioBase64)
+    .bind(id, userId, fmt, r2Key)
     .run();
 
-  // 1 ရက်ထက် ကြာသွားတဲ့ အဟောင်း audio များကို ရှင်းလင်းပါ (best-effort)
+  // 1 ရက်ထက် ကြာသွားတဲ့ အဟောင်း audio များကို D1 + R2 နှစ်ခုလုံးမှာ ရှင်းလင်းပါ (best-effort)
   try {
+    const stale = await env.DB.prepare(
+      `SELECT r2_key FROM audio_files WHERE created_at < datetime('now', '-1 day')`
+    ).all();
+    if (stale && stale.results && stale.results.length) {
+      for (const rowItem of stale.results) {
+        if (rowItem.r2_key) {
+          try { await env.AUDIO_BUCKET.delete(rowItem.r2_key); } catch (e) { /* ignore */ }
+        }
+      }
+    }
     await env.DB.prepare(`DELETE FROM audio_files WHERE created_at < datetime('now', '-1 day')`).run();
   } catch (e) {
     // ignore cleanup errors
@@ -2263,20 +2290,25 @@ async function handleAudioDownload(id, env, corsHeaders) {
   if (!id) {
     return json({ error: 'Missing audio id' }, 400, corsHeaders);
   }
+  if (!env.AUDIO_BUCKET) {
+    return json({ error: 'R2 bucket binding "AUDIO_BUCKET" ကို wrangler.toml ထဲမှာ မတွေ့ပါ။' }, 500, corsHeaders);
+  }
 
-  const row = await env.DB.prepare('SELECT format, data FROM audio_files WHERE id = ?1').bind(id).first();
+  const row = await env.DB.prepare('SELECT format, r2_key FROM audio_files WHERE id = ?1').bind(id).first();
   if (!row) {
     return json({ error: 'Audio ရှာမတွေ့ပါ သို့မဟုတ် သက်တမ်းကုန်သွားပါပြီ' }, 404, corsHeaders);
   }
 
   const format = row.format || 'wav';
   const mime = format === 'mp3' ? 'audio/mpeg' : `audio/${format}`;
+  const r2Key = row.r2_key || `audio/${id}.${format}`;
 
-  const binary = atob(row.data);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const object = await env.AUDIO_BUCKET.get(r2Key);
+  if (!object) {
+    return json({ error: 'Audio ရှာမတွေ့ပါ သို့မဟုတ် သက်တမ်းကုန်သွားပါပြီ' }, 404, corsHeaders);
+  }
 
-  return new Response(bytes, {
+  return new Response(object.body, {
     status: 200,
     headers: {
       'Content-Type': mime,
@@ -3955,30 +3987,36 @@ ${FAVICON}
     output.scrollIntoView({ behavior:'smooth', block:'nearest' });
   }
 
-  downloadAudioBtn.addEventListener('click', () => {
+  downloadAudioBtn.addEventListener('click', async () => {
     if (!lastAudioBase64) return;
+    // Telegram Mini App ရဲ့ in-app browser ထဲက တိုက်ရိုက် download မရတဲ့ ပြဿနာကြောင့်,
+    // audio ကို server ဘက် R2 ထဲ ခဏတင်ပြီး ရလာတဲ့ https URL ကို Chrome (system browser)
+    // မှာ တိုက်ရိုက်ဖွင့်ပေးပါသည် (tg.openLink ကနေတစ်ဆင့်) — ဒီ URL ရဲ့ Content-Disposition
+    // header ကြောင့် Chrome ထဲမှာ file အဖြစ် download ချနိုင်ပါသည်
+    const original = downloadAudioBtn.textContent;
+    downloadAudioBtn.disabled = true;
+    downloadAudioBtn.textContent = 'ပြင်ဆင်နေသည်…';
     try {
-      // Audio ကို D1 database (server) ထဲ ခဏမှ မသိမ်းတော့ပါ — D1 ရဲ့ row size
-      // ကန့်သတ်ချက် (~1-2MB) ကို ရှောင်ရှားနိုင်ပြီး audio size ဘယ်လောက်ကြီးကြီး
-      // download ရအောင် client ဘက်မှာပဲ Blob အဖြစ်ပြောင်းပြီး တိုက်ရိုက် download
-      // ဆွဲပေးပါသည် (base64 → binary → Blob → object URL → <a download> click)
-      const fmt = lastAudioFormat || 'wav';
-      const mime = fmt === 'mp3' ? 'audio/mpeg' : ('audio/' + fmt);
-      const binaryStr = atob(lastAudioBase64);
-      const bytes = new Uint8Array(binaryStr.length);
-      for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
-      const blob = new Blob([bytes], { type: mime });
-      const objectUrl = URL.createObjectURL(blob);
-
-      const a = document.createElement('a');
-      a.href = objectUrl;
-      a.download = 'voice-output.' + fmt;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(objectUrl), 30000);
+      const res = await fetch('/api/generate/save-audio', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData: currentInitData(), audioBase64: lastAudioBase64, format: lastAudioFormat })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success || !data.url) {
+        throw new Error(data.error || 'Download link ကို ပြင်ဆင်၍ မရပါ။');
+      }
+      const downloadUrl = new URL(data.url, window.location.origin).href;
+      if (tg && typeof tg.openLink === 'function') {
+        tg.openLink(downloadUrl, { try_instant_view: false });
+      } else {
+        window.open(downloadUrl, '_blank');
+      }
     } catch (e) {
-      setStatus('Download လုပ်၍ မရပါ။', 'err');
+      setStatus(e.message || 'Download လုပ်၍ မရပါ။', 'err');
+    } finally {
+      downloadAudioBtn.disabled = false;
+      downloadAudioBtn.textContent = original;
     }
   });
 
