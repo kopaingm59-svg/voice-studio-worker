@@ -2216,6 +2216,27 @@ async function handleApiV1GenerateStatus(request, env, corsHeaders) {
 
 const AUDIO_R2_MAX_BYTES = 30 * 1024 * 1024; // R2 ဖြစ်တဲ့အတွက် D1 ထက်များစွာ ပိုကြီးအောင် ခွင့်ပြုနိုင်ပါသည် (30MB)
 
+// audio_files table ကို R2 မတိုင်ခင်က schema (data column) ဖြင့် ဖန်တီးထားခဲ့ရင်
+// (D1_ERROR: table audio_files has no column named r2_key) "CREATE TABLE IF NOT EXISTS"
+// က ရှိပြီးသား table ကို alter မလုပ်ပေးလို့ r2_key column ကို ALTER TABLE နဲ့ ထပ်ဖြည့်ပါသည်
+// (column ရှိပြီးသားဆိုရင် error ကို ignore ပါ)
+async function ensureAudioFilesTable(env) {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS audio_files (
+      id TEXT PRIMARY KEY,
+      user_id TEXT,
+      format TEXT,
+      r2_key TEXT,
+      created_at TEXT
+    )`
+  ).run();
+  try {
+    await env.DB.prepare(`ALTER TABLE audio_files ADD COLUMN r2_key TEXT`).run();
+  } catch (e) {
+    // column ရှိပြီးသားဆိုရင် ("duplicate column name") ignore လုပ်ပါ
+  }
+}
+
 async function handleSaveAudio(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
   const { initData, audioBase64, format } = body;
@@ -2250,15 +2271,7 @@ async function handleSaveAudio(request, env, corsHeaders) {
     httpMetadata: { contentType: mime },
   });
 
-  await env.DB.prepare(
-    `CREATE TABLE IF NOT EXISTS audio_files (
-      id TEXT PRIMARY KEY,
-      user_id TEXT,
-      format TEXT,
-      r2_key TEXT,
-      created_at TEXT
-    )`
-  ).run();
+  await ensureAudioFilesTable(env);
 
   await env.DB.prepare(
     `INSERT INTO audio_files (id, user_id, format, r2_key, created_at) VALUES (?1, ?2, ?3, ?4, datetime('now'))`
@@ -2293,6 +2306,8 @@ async function handleAudioDownload(id, env, corsHeaders) {
   if (!env.AUDIO_BUCKET) {
     return json({ error: 'R2 bucket binding "AUDIO_BUCKET" ကို wrangler.toml ထဲမှာ မတွေ့ပါ။' }, 500, corsHeaders);
   }
+
+  await ensureAudioFilesTable(env);
 
   const row = await env.DB.prepare('SELECT format, r2_key FROM audio_files WHERE id = ?1').bind(id).first();
   if (!row) {
