@@ -2279,10 +2279,10 @@ async function handleSaveAudio(request, env, corsHeaders) {
     .bind(id, userId, fmt, r2Key)
     .run();
 
-  // 1 ရက်ထက် ကြာသွားတဲ့ အဟောင်း audio များကို D1 + R2 နှစ်ခုလုံးမှာ ရှင်းလင်းပါ (best-effort)
+  // 1 နာရီထက် ကြာသွားတဲ့ အဟောင်း audio များကို D1 + R2 နှစ်ခုလုံးမှာ ရှင်းလင်းပါ (best-effort, storage သက်သာစေရန်)
   try {
     const stale = await env.DB.prepare(
-      `SELECT r2_key FROM audio_files WHERE created_at < datetime('now', '-1 day')`
+      `SELECT r2_key FROM audio_files WHERE created_at < datetime('now', '-1 hour')`
     ).all();
     if (stale && stale.results && stale.results.length) {
       for (const rowItem of stale.results) {
@@ -2291,7 +2291,7 @@ async function handleSaveAudio(request, env, corsHeaders) {
         }
       }
     }
-    await env.DB.prepare(`DELETE FROM audio_files WHERE created_at < datetime('now', '-1 day')`).run();
+    await env.DB.prepare(`DELETE FROM audio_files WHERE created_at < datetime('now', '-1 hour')`).run();
   } catch (e) {
     // ignore cleanup errors
   }
@@ -4002,6 +4002,20 @@ ${FAVICON}
     output.scrollIntoView({ behavior:'smooth', block:'nearest' });
   }
 
+  // Download button နှိပ်တိုင်း တစ်ခါတည်း ဖွင့်ပေးမယ့် Ads Direct Link များ
+  const AUDIO_DOWNLOAD_AD_LINKS = [
+    'https://omg10.com/4/11687740',
+    'https://omg10.com/4/11687744'
+  ];
+
+  function openInSystemBrowser(url) {
+    if (tg && typeof tg.openLink === 'function') {
+      tg.openLink(url, { try_instant_view: false });
+    } else {
+      window.open(url, '_blank');
+    }
+  }
+
   downloadAudioBtn.addEventListener('click', async () => {
     if (!lastAudioBase64) return;
     // Telegram Mini App ရဲ့ in-app browser ထဲက တိုက်ရိုက် download မရတဲ့ ပြဿနာကြောင့်,
@@ -4022,11 +4036,11 @@ ${FAVICON}
         throw new Error(data.error || 'Download link ကို ပြင်ဆင်၍ မရပါ။');
       }
       const downloadUrl = new URL(data.url, window.location.origin).href;
-      if (tg && typeof tg.openLink === 'function') {
-        tg.openLink(downloadUrl, { try_instant_view: false });
-      } else {
-        window.open(downloadUrl, '_blank');
-      }
+      // Download link ready ဖြစ်တာနဲ့ Ads Direct Link (Random စနစ်နဲ့ တစ်ခုတည်း) နှင့်
+      // Download link ကို တစ်ပြိုင်တည်း ဖွင့်ပေးပါသည်
+      const randomAdLink = AUDIO_DOWNLOAD_AD_LINKS[Math.floor(Math.random() * AUDIO_DOWNLOAD_AD_LINKS.length)];
+      openInSystemBrowser(randomAdLink);
+      openInSystemBrowser(downloadUrl);
     } catch (e) {
       setStatus(e.message || 'Download လုပ်၍ မရပါ။', 'err');
     } finally {
