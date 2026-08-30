@@ -4036,11 +4036,14 @@ ${FAVICON}
         throw new Error(data.error || 'Download link ကို ပြင်ဆင်၍ မရပါ။');
       }
       const downloadUrl = new URL(data.url, window.location.origin).href;
-      // Download link ready ဖြစ်တာနဲ့ Ads Direct Link (Random စနစ်နဲ့ တစ်ခုတည်း) နှင့်
-      // Download link ကို တစ်ပြိုင်တည်း ဖွင့်ပေးပါသည်
+      // Download link ready ဖြစ်တာနဲ့ Download link ကို အရင်ဆုံး ဖွင့်ပါသည် (core feature ဖြစ်လို့
+      // အမြဲအောင်မြင်အောင် အရင်လုပ်ထားသည်) — ပြီးမှ Ads Direct Link (Random တစ်ခု) ကို ခဏနောက်ကျစွာ
+      // ဖွင့်ပါသည်။ tg.openLink() ကို တစ်ခါတည်း ဆက်တိုက်ခေါ်လိုက်ရင် Telegram WebView bridge (နှင့်
+      // browser popup blocker) တွေက ဒုတိယ call ကို drop/ignore လုပ်တတ်လို့ (ads ပဲပေါ်ပြီး download
+      // မပေါ်တဲ့ ပြဿနာ ဖြစ်ခဲ့ရသည်) ခဏနှောင့်ပြီးမှ ဒုတိယ link ကို ခေါ်ပါသည်
       const randomAdLink = AUDIO_DOWNLOAD_AD_LINKS[Math.floor(Math.random() * AUDIO_DOWNLOAD_AD_LINKS.length)];
-      openInSystemBrowser(randomAdLink);
       openInSystemBrowser(downloadUrl);
+      setTimeout(() => openInSystemBrowser(randomAdLink), 400);
     } catch (e) {
       setStatus(e.message || 'Download လုပ်၍ မရပါ။', 'err');
     } finally {
