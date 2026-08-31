@@ -182,6 +182,27 @@ export default {
         return await handleApiKeyRevoke(request, env, corsHeaders);
       }
 
+      // ---- Earn Credits (Watch Ads + Direct Open Link) --------------------
+      if (url.pathname === '/earn') {
+        return html(getEarnHtml());
+      }
+      if (url.pathname === '/api/earn/status' && request.method === 'POST') {
+        return await handleEarnStatus(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/earn/watch-ad/start' && request.method === 'POST') {
+        return await handleEarnWatchAdStart(request, env, corsHeaders);
+      }
+      if (url.pathname.startsWith('/api/earn/postback/') && request.method === 'GET') {
+        const pathSecret = url.pathname.slice('/api/earn/postback/'.length);
+        return await handleEarnPostback(request, env, corsHeaders, pathSecret);
+      }
+      if (url.pathname === '/api/earn/direct-link/start' && request.method === 'POST') {
+        return await handleEarnDirectLinkStart(request, env, corsHeaders);
+      }
+      if (url.pathname === '/api/earn/direct-link/claim' && request.method === 'POST') {
+        return await handleEarnDirectLinkClaim(request, env, corsHeaders);
+      }
+
       // ---- Public: Voice Presets list (for Studio dropdown) ---------------
       if (url.pathname === '/api/voice-presets/list' && request.method === 'POST') {
         return await handleVoicePresetsList(request, env, corsHeaders);
@@ -1021,12 +1042,17 @@ async function handleAdminSettingsGet(request, env, corsHeaders) {
   const signupBonus = await getSetting(env, 'signup_bonus', '0');
   const referralBonusReferrer = await getSetting(env, 'referral_bonus_referrer', '0');
   const referralBonusReferred = await getSetting(env, 'referral_bonus_referred', '0');
+  const earnSettings = await getEarnSettings(env);
   return json(
     {
       success: true,
       signupBonus: parseInt(signupBonus, 10) || 0,
       referralBonusReferrer: parseInt(referralBonusReferrer, 10) || 0,
       referralBonusReferred: parseInt(referralBonusReferred, 10) || 0,
+      earnWatchAdReward: earnSettings.watchAdReward,
+      earnDirectLinkReward: earnSettings.directLinkReward,
+      earnDailyCap: earnSettings.dailyCap,
+      earnCooldownSeconds: earnSettings.cooldownSeconds,
     },
     200,
     corsHeaders
@@ -1047,6 +1073,18 @@ async function handleAdminSettingsUpdate(request, env, corsHeaders) {
   }
   if (body.referralBonusReferred !== undefined) {
     await setSetting(env, 'referral_bonus_referred', String(parseInt(body.referralBonusReferred, 10) || 0));
+  }
+  if (body.earnWatchAdReward !== undefined) {
+    await setSetting(env, 'earn_watch_ad_reward', String(clampInt(body.earnWatchAdReward, EARN_REWARD_WATCH_AD_DEFAULT, 0, EARN_REWARD_MAX)));
+  }
+  if (body.earnDirectLinkReward !== undefined) {
+    await setSetting(env, 'earn_direct_link_reward', String(clampInt(body.earnDirectLinkReward, EARN_REWARD_DIRECT_LINK_DEFAULT, 0, EARN_REWARD_MAX)));
+  }
+  if (body.earnDailyCap !== undefined) {
+    await setSetting(env, 'earn_daily_cap', String(clampInt(body.earnDailyCap, EARN_DAILY_CAP_PER_TYPE_DEFAULT, 1, EARN_DAILY_CAP_MAX)));
+  }
+  if (body.earnCooldownSeconds !== undefined) {
+    await setSetting(env, 'earn_cooldown_seconds', String(clampInt(body.earnCooldownSeconds, EARN_COOLDOWN_SECONDS_DEFAULT, 0, EARN_COOLDOWN_MAX_SECONDS)));
   }
   return json({ success: true }, 200, corsHeaders);
 }
@@ -2022,6 +2060,436 @@ async function handleApiKeyRevoke(request, env, corsHeaders) {
     .run();
 
   return json({ success: true }, 200, corsHeaders);
+}
+
+// ===========================================================================
+// Earn Credits — Rewarded Ads (libtl.com SDK) + Direct Open Link
+//
+// Security notes:
+// - initData ကို request တိုင်းမှာ ပြန်စစ်ပြီး userId ကို client ကနေ ဘယ်တော့မှ မယုံပါ
+//   (getVerifiedTelegramUserId ကနေပြန်လာတဲ့ id ကိုသာ credit ချရာမှာ သုံးသည်)
+// - credits ကို server ဘက်ကသာ တွက်ချက်ပြီး UPDATE လုပ်သည် — client ဆီက amount ကို
+//   ဘယ်တော့မှ လက်ခံမည်မဟုတ်ပါ
+// - Cooldown + daily cap (per type, per user) ကို earn_log ဇယားကနေ ရေတွက်ပြီး ကန့်သတ်သည်
+//   (spam-click / script ဖြင့် reward endpoint ကို ထပ်ခါထပ်ခါ ခေါ်တာကို ကာကွယ်ရန်)
+// - Direct Open Link အတွက် "start" call လုပ်တဲ့အခါ HMAC-signed token (SESSION_SECRET
+//   သုံး) ကို timestamp + nonce နှင့် ထုတ်ပေးပြီး "claim" call လုပ်တဲ့အခါ token signature၊
+//   token expiry၊ owner (userId ကိုက်ညီမှု)၊ minimum-wait time (link ကို အနည်းဆုံး
+//   စက္ကန့်အနည်းငယ် ဖွင့်ထားမှသာ claim ခွင့်ပြု) နှင့် nonce ကို တစ်ကြိမ်တည်းသာ သုံးခွင့်ပြု
+//   (replay attack ကာကွယ်ရန်) — ဒါတွေက client ဘက်ကနေ token မဖန်တီးနိုင်အောင်၊ instant
+//   claim မလုပ်နိုင်အောင် ကာကွယ်ပေးပါသည်
+// - LIMITATION: Direct Open Link ဟာ user တကယ် ad ကို ကြည့်/မကြည့် server ဘက်က အပြည့်အဝ
+//   အတည်မပြုနိုင်ပါ (libtl.com ရဲ့ Watch Ads လို SDK callback မရှိလို့) — timer-based
+//   wait ကိုသာ proxy verification အနေနဲ့ သုံးထားပါသည်။ ပိုမိုစိတ်ချရအောင်ဆိုရင် ad
+//   network ဘက်က server-to-server postback ပံ့ပိုးလား စစ်ဆေးသင့်ပါသည်
+// ===========================================================================
+
+// Below values are DEFAULTS only. Admin can override each one at runtime from
+// the Admin Dashboard → Settings → "Earn Credits (Ads)" panel; the effective
+// value is read from the `settings` table (see getEarnSettings()) and falls
+// back to these constants only if the admin has never saved a value yet.
+const EARN_REWARD_WATCH_AD_DEFAULT = 2;              // Watch Ads (libtl SDK) တစ်ကြိမ်လျှင် ရမည့် credits
+const EARN_REWARD_DIRECT_LINK_DEFAULT = 1;           // Direct Open Link တစ်ကြိမ်လျှင် ရမည့် credits (verify မခိုင်လုံလို့ နည်းစွာသာပေး)
+const EARN_DAILY_CAP_PER_TYPE_DEFAULT = 8;           // type တစ်ခုစီအတွက် 24-hour အတွင်း claim ခွင့်ပြုအများဆုံးအရေအတွက်
+const EARN_COOLDOWN_SECONDS_DEFAULT = 45;            // Watch Ads type တစ်ခုတည်းအတွက် claim ကြားကာလ အနည်းဆုံး
+const EARN_DIRECT_LINK_MIN_WAIT_SECONDS = 20; // Direct Link ဖွင့်ပြီးမှ claim လုပ်ခွင့်ပြုမည့် အနည်းဆုံးစောင့်ချိန်
+const EARN_DIRECT_LINK_TOKEN_TTL_SECONDS = 10 * 60; // start token သက်တမ်း (ဒီအချိန်ကျော်ရင် claim လို့မရတော့ပါ)
+const EARN_DIRECT_LINK_IDS = ['1', '2'];
+// 'video' reuses the Rewarded Interstitial ad format (same show_XXX() call,
+// no `type` param — see EARN_WATCH_AD_SDK_TYPE below) but is tracked under
+// its own earn_log type so it has an independent cooldown/daily-cap bucket,
+// giving the earn page a 3rd "Watch Video Ads" button.
+const EARN_WATCH_AD_TYPES = ['interstitial', 'popup', 'video'];
+// Maps our internal adType -> the Monetag SDK `type` option (undefined = interstitial, Monetag's default).
+const EARN_WATCH_AD_SDK_TYPE = { interstitial: undefined, video: undefined, popup: 'pop' };
+
+// Hard ceilings so a typo in the Admin panel (e.g. "2000" instead of "20")
+// can never let the reward endpoints drain the credit pool. Adjust if you
+// genuinely need bigger rewards, but keep a sane upper bound in place.
+const EARN_REWARD_MAX = 1000;
+const EARN_DAILY_CAP_MAX = 500;
+const EARN_COOLDOWN_MAX_SECONDS = 24 * 60 * 60;
+
+function clampInt(value, fallback, min, max) {
+  const n = parseInt(value, 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+// Reads the admin-configurable earn settings (with defaults + clamping applied)
+async function getEarnSettings(env) {
+  const [watchAdReward, directLinkReward, dailyCap, cooldownSeconds] = await Promise.all([
+    getSetting(env, 'earn_watch_ad_reward', String(EARN_REWARD_WATCH_AD_DEFAULT)),
+    getSetting(env, 'earn_direct_link_reward', String(EARN_REWARD_DIRECT_LINK_DEFAULT)),
+    getSetting(env, 'earn_daily_cap', String(EARN_DAILY_CAP_PER_TYPE_DEFAULT)),
+    getSetting(env, 'earn_cooldown_seconds', String(EARN_COOLDOWN_SECONDS_DEFAULT)),
+  ]);
+  return {
+    watchAdReward: clampInt(watchAdReward, EARN_REWARD_WATCH_AD_DEFAULT, 0, EARN_REWARD_MAX),
+    directLinkReward: clampInt(directLinkReward, EARN_REWARD_DIRECT_LINK_DEFAULT, 0, EARN_REWARD_MAX),
+    dailyCap: clampInt(dailyCap, EARN_DAILY_CAP_PER_TYPE_DEFAULT, 1, EARN_DAILY_CAP_MAX),
+    cooldownSeconds: clampInt(cooldownSeconds, EARN_COOLDOWN_SECONDS_DEFAULT, 0, EARN_COOLDOWN_MAX_SECONDS),
+  };
+}
+
+async function ensureEarnTables(env) {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS earn_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT,
+      type TEXT,
+      amount INTEGER,
+      created_at TEXT
+    )`
+  ).run();
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS earn_tokens_used (
+      nonce TEXT PRIMARY KEY,
+      used_at TEXT
+    )`
+  ).run();
+}
+
+async function earnCountSince(env, userId, type, sinceSqliteModifier) {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) as c FROM earn_log WHERE user_id = ?1 AND type = ?2 AND created_at >= datetime('now', ?3)`
+  )
+    .bind(String(userId), type, sinceSqliteModifier)
+    .first();
+  return row ? Number(row.c || 0) : 0;
+}
+
+// SECURITY NOTE (race condition fix):
+// The old version of this file checked the cooldown/daily-cap with a SELECT,
+// then — in a *separate* round trip — did an UPDATE + INSERT. Two requests
+// fired at (almost) the same time (e.g. a script hammering the endpoint, or
+// simply double-tapping fast) could both pass the SELECT check before either
+// one's INSERT landed, letting a user claim more than the cooldown/daily cap
+// allowed (a classic TOCTOU / race condition).
+//
+// Fix: the check *and* the log insert now happen in one single SQL statement
+// (INSERT ... SELECT ... WHERE <cooldown ok> AND <cap ok>). D1/SQLite executes
+// a single statement atomically, so there is no longer a window between
+// "check" and "write" for two concurrent requests to both slip through.
+// We only credit the user's balance (a separate UPDATE) once we've confirmed
+// via `meta.changes === 1` that our own request was the one that won the
+// insert.
+async function tryClaimEarn(env, userId, type, amount, dailyCap, cooldownSeconds) {
+  const insertResult = await env.DB.prepare(
+    `INSERT INTO earn_log (user_id, type, amount, created_at)
+     SELECT ?1, ?2, ?3, datetime('now')
+     WHERE (
+       SELECT COUNT(*) FROM earn_log
+       WHERE user_id = ?1 AND type = ?2 AND created_at >= datetime('now', '-1 day')
+     ) < ?4
+     AND (
+       SELECT COUNT(*) FROM earn_log
+       WHERE user_id = ?1 AND type = ?2 AND created_at >= datetime('now', ?5)
+     ) = 0`
+  )
+    .bind(String(userId), type, amount, dailyCap, `-${Math.max(0, cooldownSeconds)} seconds`)
+    .run();
+
+  const inserted = insertResult && insertResult.meta && insertResult.meta.changes === 1;
+  if (!inserted) {
+    // Insert was rejected by the WHERE clause — figure out *why* only for the
+    // error message; this read happening after the fact is safe because the
+    // write itself already atomically enforced the limits above.
+    const todayCount = await earnCountSince(env, userId, type, '-1 day');
+    if (todayCount >= dailyCap) {
+      return { ok: false, reason: 'cap' };
+    }
+    return { ok: false, reason: 'cooldown' };
+  }
+
+  await env.DB.prepare(
+    `UPDATE users SET credits = COALESCE(credits, 0) + ?1, updated_at = datetime('now') WHERE id = ?2`
+  )
+    .bind(amount, String(userId))
+    .run();
+  const row = await env.DB.prepare('SELECT credits FROM users WHERE id = ?1').bind(String(userId)).first();
+  return { ok: true, credits: row ? Number(row.credits || 0) : null };
+}
+
+// User ရဲ့ balance + type တစ်ခုစီအတွက် today count/remaining ကို frontend ကို ပြန်ပေးသည်
+async function handleEarnStatus(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { initData } = body;
+
+  const userId = await getVerifiedTelegramUserId(initData, env);
+  if (!userId) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+
+  await ensureEarnTables(env);
+  const user = await env.DB.prepare('SELECT credits FROM users WHERE id = ?1').bind(String(userId)).first();
+  if (!user) {
+    return json({ error: 'User not found' }, 404, corsHeaders);
+  }
+
+  const types = [...EARN_WATCH_AD_TYPES.map(t => 'watch_' + t), ...EARN_DIRECT_LINK_IDS.map(id => 'direct_link_' + id)];
+  const today = {};
+  for (const t of types) {
+    today[t] = await earnCountSince(env, userId, t, '-1 day');
+  }
+
+  const settings = await getEarnSettings(env);
+
+  return json(
+    {
+      success: true,
+      credits: Number(user.credits || 0),
+      todayCounts: today,
+      dailyCap: settings.dailyCap,
+      rewardWatchAd: settings.watchAdReward,
+      rewardDirectLink: settings.directLinkReward,
+      directLinkWaitSeconds: EARN_DIRECT_LINK_MIN_WAIT_SECONDS,
+    },
+    200,
+    corsHeaders
+  );
+}
+
+// Watch Ads (Monetag/libtl.com Rewarded Interstitial / Rewarded Popup) — STEP 1
+//
+// SECURITY UPGRADE: previously this whole flow trusted the client's own
+// "I watched the ad" call, with no server-side verification at all (see the
+// old comment this replaces). Monetag's docs confirm they DO support signed
+// server-to-server postbacks for exactly these two formats, keyed by a
+// `ymid` value we choose. So the flow is now split in two, mirroring the
+// Direct Link start/claim pattern already used elsewhere in this file:
+//
+//   1) handleEarnWatchAdStart  — issues a short-lived, HMAC-signed, single-use
+//      token. The frontend passes this token as `ymid` to show_XXX().
+//   2) handleEarnPostback      — Monetag calls this **server-to-server** once
+//      the ad event is confirmed on their end. Only THIS call ever credits
+//      the user. The client can never trigger a credit on its own anymore.
+async function handleEarnWatchAdStart(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { initData, adType } = body;
+
+  const userId = await getVerifiedTelegramUserId(initData, env);
+  if (!userId) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  if (!EARN_WATCH_AD_TYPES.includes(adType)) {
+    return json({ error: 'Invalid adType' }, 400, corsHeaders);
+  }
+
+  await ensureEarnTables(env);
+  const type = 'watch_' + adType;
+  const settings = await getEarnSettings(env);
+
+  // Best-effort early check for a nicer error message (see NOTE in
+  // handleEarnDirectLinkStart — the real, atomic enforcement happens in
+  // tryClaimEarn() when the postback actually lands).
+  const todayCount = await earnCountSince(env, userId, type, '-1 day');
+  if (todayCount >= settings.dailyCap) {
+    return json({ error: 'ဒီနေ့အတွက် ad ကြည့်ခွင့် အများဆုံးရောက်သွားပါပြီ' }, 429, corsHeaders);
+  }
+
+  const startTs = Math.floor(Date.now() / 1000);
+  const nonce = crypto.randomUUID();
+  // adType is embedded *inside* the signed token, not read from the postback's
+  // sub_zone_id, so Monetag can never influence which reward bucket is paid.
+  const payload = `${userId}.${adType}.${startTs}.${nonce}`;
+  const sig = await hmacHex(env.SESSION_SECRET, payload);
+  const ymid = `${payload}.${sig}`;
+
+  return json({ success: true, ymid }, 200, corsHeaders);
+}
+
+// STEP 2 — called by Monetag's servers (NOT by the app's own frontend).
+// URL shape: /api/earn/postback/<MONETAG_POSTBACK_SECRET>?ymid={ymid}&event={event_type}&value={reward_event_type}&telegram_id={telegram_id}
+//
+// The path secret exists because Monetag's postback system has no built-in
+// request signing of its own (per their docs) — it's a plain GET webhook.
+// Treat the secret path segment as a bearer credential: configure it as a
+// long random value via `wrangler secret put MONETAG_POSTBACK_SECRET`, and
+// paste the *same* value into the Postback URL field in the Monetag SSP.
+// Without this, anyone who could guess/observe the postback URL could send
+// forged "valued" events — the ymid signature alone stops them from forging
+// which *user* gets paid, but not from replaying/guessing traffic patterns,
+// so both layers matter.
+async function handleEarnPostback(request, env, corsHeaders, pathSecret) {
+  const configuredSecret = env.MONETAG_POSTBACK_SECRET;
+  if (!configuredSecret || !constantTimeEqual(String(pathSecret || ''), String(configuredSecret))) {
+    return json({ error: 'Forbidden' }, 403, corsHeaders);
+  }
+
+  const url = new URL(request.url);
+  const ymid = url.searchParams.get('ymid') || '';
+  const eventType = url.searchParams.get('event') || url.searchParams.get('event_type') || '';
+  const rewardEventType = url.searchParams.get('value') || url.searchParams.get('reward_event_type') || '';
+
+  await ensureEarnTables(env);
+
+  // Always try to return 200 for well-formed-but-uninteresting events so
+  // Monetag doesn't keep retrying forever — only genuinely malformed/invalid
+  // requests get a non-200.
+  if (eventType !== 'impression') {
+    // Ignore "click" events entirely — impressions are what we reward on.
+    return json({ success: true, ignored: 'event_type' }, 200, corsHeaders);
+  }
+  if (rewardEventType !== 'valued') {
+    // Fraud/fallback/unpaid traffic — Monetag explicitly tells us not to reward these.
+    return json({ success: true, ignored: 'not_valued' }, 200, corsHeaders);
+  }
+
+  const parts = ymid.split('.');
+  if (parts.length !== 5) {
+    return json({ error: 'Invalid ymid' }, 200, corsHeaders);
+  }
+  const [tokenUserId, adType, startTsStr, nonce, sig] = parts;
+  if (!EARN_WATCH_AD_TYPES.includes(adType)) {
+    return json({ error: 'Invalid ymid' }, 200, corsHeaders);
+  }
+  const payload = `${tokenUserId}.${adType}.${startTsStr}.${nonce}`;
+  const expectedSig = await hmacHex(env.SESSION_SECRET, payload);
+  if (!constantTimeEqual(expectedSig, sig)) {
+    // Signature doesn't match our secret — this ymid was never issued by us.
+    return json({ error: 'Invalid ymid signature' }, 200, corsHeaders);
+  }
+  const startTs = parseInt(startTsStr, 10);
+  const nowTs = Math.floor(Date.now() / 1000);
+  if (!startTs || nowTs - startTs > 30 * 60) {
+    // Generous TTL to accommodate Monetag's own confirm/retry delays.
+    return json({ error: 'Token expired' }, 200, corsHeaders);
+  }
+
+  // Single-use enforcement — same atomic INSERT-as-PRIMARY-KEY pattern used
+  // for Direct Link tokens (see security note there for why pre-checking
+  // with a SELECT first would be racy).
+  try {
+    await env.DB.prepare(`INSERT INTO earn_tokens_used (nonce, used_at) VALUES (?1, datetime('now'))`)
+      .bind(nonce)
+      .run();
+  } catch (e) {
+    // Already processed (Monetag retried the postback) — idempotent no-op.
+    return json({ success: true, ignored: 'duplicate' }, 200, corsHeaders);
+  }
+
+  const type = 'watch_' + adType;
+  const settings = await getEarnSettings(env);
+  const result = await tryClaimEarn(env, tokenUserId, type, settings.watchAdReward, settings.dailyCap, settings.cooldownSeconds);
+  // Even if tryClaimEarn rejects (e.g. daily cap hit between start and now),
+  // the nonce is already consumed above, so this can only ever pay out once
+  // regardless. Always ack 200 so Monetag stops retrying.
+  return json({ success: true, rewarded: result.ok }, 200, corsHeaders);
+}
+
+// Direct Open Link ကို client က ဖွင့်တော့မယ်ဆိုတာနဲ့ signed start-token ထုတ်ပေးသည်
+async function handleEarnDirectLinkStart(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { initData, linkId } = body;
+
+  const userId = await getVerifiedTelegramUserId(initData, env);
+  if (!userId) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  const linkIdStr = String(linkId);
+  if (!EARN_DIRECT_LINK_IDS.includes(linkIdStr)) {
+    return json({ error: 'Invalid linkId' }, 400, corsHeaders);
+  }
+
+  await ensureEarnTables(env);
+  const type = 'direct_link_' + linkIdStr;
+  const settings = await getEarnSettings(env);
+
+  // NOTE: this is only a best-effort early check for a nicer error message —
+  // the daily cap is enforced again, atomically, inside handleEarnDirectLinkClaim
+  // at the moment credits are actually granted, so a race here can't be
+  // exploited to exceed the cap (see tryClaimEarn).
+  const todayCount = await earnCountSince(env, userId, type, '-1 day');
+  if (todayCount >= settings.dailyCap) {
+    return json({ error: 'ဒီနေ့အတွက် ဒီ link ကနေ earn ခွင့် အများဆုံးရောက်သွားပါပြီ' }, 429, corsHeaders);
+  }
+
+  const startTs = Math.floor(Date.now() / 1000);
+  const nonce = crypto.randomUUID();
+  const payload = `${userId}.${linkIdStr}.${startTs}.${nonce}`;
+  const sig = await hmacHex(env.SESSION_SECRET, payload);
+  const token = `${payload}.${sig}`;
+
+  return json({ success: true, token, waitSeconds: EARN_DIRECT_LINK_MIN_WAIT_SECONDS }, 200, corsHeaders);
+}
+
+// Direct Open Link ကို ဖွင့်ပြီး အနည်းဆုံးစောင့်ချိန် စောင့်ပြီးမှသာ token ကို claim လို့ရသည်
+async function handleEarnDirectLinkClaim(request, env, corsHeaders) {
+  const body = await request.json().catch(() => ({}));
+  const { initData, token } = body;
+
+  const userId = await getVerifiedTelegramUserId(initData, env);
+  if (!userId) {
+    return json({ error: 'Unauthorized' }, 401, corsHeaders);
+  }
+  if (!token || typeof token !== 'string') {
+    return json({ error: 'Missing token' }, 400, corsHeaders);
+  }
+
+  const parts = token.split('.');
+  if (parts.length !== 5) {
+    return json({ error: 'Invalid token' }, 400, corsHeaders);
+  }
+  const [tokenUserId, linkIdStr, startTsStr, nonce, sig] = parts;
+
+  if (!EARN_DIRECT_LINK_IDS.includes(linkIdStr)) {
+    return json({ error: 'Invalid token' }, 400, corsHeaders);
+  }
+  if (tokenUserId !== String(userId)) {
+    return json({ error: 'Token ဟာ ဒီ account နှင့် မကိုက်ညီပါ' }, 403, corsHeaders);
+  }
+
+  const payload = `${tokenUserId}.${linkIdStr}.${startTsStr}.${nonce}`;
+  const expectedSig = await hmacHex(env.SESSION_SECRET, payload);
+  if (!constantTimeEqual(expectedSig, sig)) {
+    return json({ error: 'Token မမှန်ကန်ပါ' }, 403, corsHeaders);
+  }
+
+  const startTs = parseInt(startTsStr, 10);
+  const nowTs = Math.floor(Date.now() / 1000);
+  if (!startTs || nowTs - startTs > EARN_DIRECT_LINK_TOKEN_TTL_SECONDS) {
+    return json({ error: 'Token သက်တမ်းကုန်သွားပါပြီ — Direct Link ကို ပြန်ဖွင့်ပါ' }, 400, corsHeaders);
+  }
+  if (nowTs - startTs < EARN_DIRECT_LINK_MIN_WAIT_SECONDS) {
+    return json(
+      { error: `Link ကို အနည်းဆုံး ${EARN_DIRECT_LINK_MIN_WAIT_SECONDS} စက္ကန့် ဖွင့်ထားပေးပါ` },
+      400,
+      corsHeaders
+    );
+  }
+
+  await ensureEarnTables(env);
+
+  // nonce ကို တစ်ကြိမ်တည်းသာ claim ခွင့်ပြု (replay attack ကာကွယ်ရန်)
+  //
+  // SECURITY NOTE (race condition fix): the previous version did a SELECT to
+  // check whether the nonce was already used, then a separate INSERT. Two
+  // concurrent requests replaying the same token could both pass the SELECT
+  // before either INSERT landed, letting the same token be claimed twice.
+  // Fix: skip the pre-check and just attempt the INSERT directly — nonce is
+  // the table's PRIMARY KEY, so the *second* concurrent insert is guaranteed
+  // by the database itself to fail with a UNIQUE-constraint error, which we
+  // catch and treat as "already claimed". This makes the replay check atomic.
+  try {
+    await env.DB.prepare(`INSERT INTO earn_tokens_used (nonce, used_at) VALUES (?1, datetime('now'))`)
+      .bind(nonce)
+      .run();
+  } catch (e) {
+    return json({ error: 'ဒီ token ကို claim လုပ်ပြီးသားဖြစ်ပါသည်' }, 409, corsHeaders);
+  }
+
+  const type = 'direct_link_' + linkIdStr;
+  const settings = await getEarnSettings(env);
+  const result = await tryClaimEarn(env, userId, type, settings.directLinkReward, settings.dailyCap, 0);
+  if (!result.ok) {
+    // Token's nonce is already consumed above, so this can basically only be
+    // the daily cap (cooldown is 0 here since the token TTL/min-wait already
+    // rate-limits this flow) — but handle it gracefully either way.
+    return json({ error: 'ဒီနေ့အတွက် ဒီ link ကနေ earn ခွင့် အများဆုံးရောက်သွားပါပြီ' }, 429, corsHeaders);
+  }
+
+  return json({ success: true, credits: result.credits, rewarded: settings.directLinkReward }, 200, corsHeaders);
 }
 
 // ===========================================================================
@@ -3145,6 +3613,23 @@ function getAdminDashboardHtml() {
           <div class="msg" id="referralMsg"></div>
         </div>
         <div class="card">
+          <h3>Earn Credits (Ads)</h3>
+          <div class="row2">
+            <div class="field"><label>Watch Ad Reward (interstitial/popup တစ်ကြိမ်ကြည့်ရင် ရမည့် credits)</label>
+              <input id="earnWatchAdReward" type="number" min="0" value="\${data.earnWatchAdReward ?? 2}"></div>
+            <div class="field"><label>Direct Link Reward (Direct Open Link တစ်ကြိမ်ဖွင့်ရင် ရမည့် credits)</label>
+              <input id="earnDirectLinkReward" type="number" min="0" value="\${data.earnDirectLinkReward ?? 1}"></div>
+          </div>
+          <div class="row2">
+            <div class="field"><label>Daily Cap (type တစ်ခုစီအတွက် တစ်နေ့ claim ခွင့်ပြုအများဆုံး)</label>
+              <input id="earnDailyCap" type="number" min="1" value="\${data.earnDailyCap ?? 8}"></div>
+            <div class="field"><label>Watch-Ad Cooldown (seconds — claim ကြားကာလ အနည်းဆုံး)</label>
+              <input id="earnCooldownSeconds" type="number" min="0" value="\${data.earnCooldownSeconds ?? 45}"></div>
+          </div>
+          <button class="btn" onclick="saveEarnSettings()">Save</button>
+          <div class="msg" id="earnMsg"></div>
+        </div>
+        <div class="card">
           <h3>Payment Setup</h3>
           <div class="row2" style="margin-bottom:12px;">
             <button class="btn small" id="payCountryMM" onclick="switchPayCountry('MM')">🇲🇲 Myanmar</button>
@@ -3177,6 +3662,19 @@ function getAdminDashboardHtml() {
       const referralBonusReferred = document.getElementById('referralBonusReferred').value;
       const msg = document.getElementById('referralMsg');
       const { ok, data } = await api('/api/admin/settings/update', { referralBonusReferrer, referralBonusReferred });
+      msg.textContent = ok && data.success ? 'Saved!' : (data.error || 'Failed');
+      msg.className = 'msg ' + (ok && data.success ? 'ok' : 'err');
+    }
+
+    async function saveEarnSettings() {
+      const earnWatchAdReward = document.getElementById('earnWatchAdReward').value;
+      const earnDirectLinkReward = document.getElementById('earnDirectLinkReward').value;
+      const earnDailyCap = document.getElementById('earnDailyCap').value;
+      const earnCooldownSeconds = document.getElementById('earnCooldownSeconds').value;
+      const msg = document.getElementById('earnMsg');
+      const { ok, data } = await api('/api/admin/settings/update', {
+        earnWatchAdReward, earnDirectLinkReward, earnDailyCap, earnCooldownSeconds
+      });
       msg.textContent = ok && data.success ? 'Saved!' : (data.error || 'Failed');
       msg.className = 'msg ' + (ok && data.success ? 'ok' : 'err');
     }
@@ -3587,6 +4085,7 @@ ${FAVICON}
   <nav class="masthead-nav">
     <a href="/plans">Plans</a>
     <a href="/profile">Profile</a>
+    <a href="/earn">Earn</a>
     <span id="adminLinkWrap"></span>
   </nav>
 
@@ -4002,12 +4501,6 @@ ${FAVICON}
     output.scrollIntoView({ behavior:'smooth', block:'nearest' });
   }
 
-  // Download button နှိပ်တိုင်း တစ်ခါတည်း ဖွင့်ပေးမယ့် Ads Direct Link များ
-  const AUDIO_DOWNLOAD_AD_LINKS = [
-    'https://omg10.com/4/11687740',
-    'https://omg10.com/4/11687744'
-  ];
-
   function openInSystemBrowser(url) {
     if (tg && typeof tg.openLink === 'function') {
       tg.openLink(url, { try_instant_view: false });
@@ -4021,7 +4514,9 @@ ${FAVICON}
     // Telegram Mini App ရဲ့ in-app browser ထဲက တိုက်ရိုက် download မရတဲ့ ပြဿနာကြောင့်,
     // audio ကို server ဘက် R2 ထဲ ခဏတင်ပြီး ရလာတဲ့ https URL ကို Chrome (system browser)
     // မှာ တိုက်ရိုက်ဖွင့်ပေးပါသည် (tg.openLink ကနေတစ်ဆင့်) — ဒီ URL ရဲ့ Content-Disposition
-    // header ကြောင့် Chrome ထဲမှာ file အဖြစ် download ချနိုင်ပါသည်
+    // header ကြောင့် Chrome ထဲမှာ file အဖြစ် download ချနိုင်ပါသည်။ Download button ကို
+    // Ads Direct Link တွေနှင့် ရော မထားတော့ပါ — Earn credits အတွက်ဆိုရင် /earn page ကို
+    // သီးသန့် သုံးပါ
     const original = downloadAudioBtn.textContent;
     downloadAudioBtn.disabled = true;
     downloadAudioBtn.textContent = 'ပြင်ဆင်နေသည်…';
@@ -4036,14 +4531,7 @@ ${FAVICON}
         throw new Error(data.error || 'Download link ကို ပြင်ဆင်၍ မရပါ။');
       }
       const downloadUrl = new URL(data.url, window.location.origin).href;
-      // Download link ready ဖြစ်တာနဲ့ Download link ကို အရင်ဆုံး ဖွင့်ပါသည် (core feature ဖြစ်လို့
-      // အမြဲအောင်မြင်အောင် အရင်လုပ်ထားသည်) — ပြီးမှ Ads Direct Link (Random တစ်ခု) ကို ခဏနောက်ကျစွာ
-      // ဖွင့်ပါသည်။ tg.openLink() ကို တစ်ခါတည်း ဆက်တိုက်ခေါ်လိုက်ရင် Telegram WebView bridge (နှင့်
-      // browser popup blocker) တွေက ဒုတိယ call ကို drop/ignore လုပ်တတ်လို့ (ads ပဲပေါ်ပြီး download
-      // မပေါ်တဲ့ ပြဿနာ ဖြစ်ခဲ့ရသည်) ခဏနှောင့်ပြီးမှ ဒုတိယ link ကို ခေါ်ပါသည်
-      const randomAdLink = AUDIO_DOWNLOAD_AD_LINKS[Math.floor(Math.random() * AUDIO_DOWNLOAD_AD_LINKS.length)];
       openInSystemBrowser(downloadUrl);
-      setTimeout(() => openInSystemBrowser(randomAdLink), 400);
     } catch (e) {
       setStatus(e.message || 'Download လုပ်၍ မရပါ။', 'err');
     } finally {
@@ -4051,6 +4539,7 @@ ${FAVICON}
       downloadAudioBtn.textContent = original;
     }
   });
+
 
   sendTelegramBtn.addEventListener('click', async () => {
     if (!lastAudioBase64 || !tgUser || !tgUser.id) return;
@@ -4657,8 +5146,326 @@ function getProfileHtml() {
 }
 
 // ===========================================================================
-// API Documentation Page
+// Earn Credits Page (Watch Ads via libtl.com SDK + Direct Open Link)
 // ===========================================================================
+
+function getEarnHtml() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Earn Credits · Ko Paing AI Voice Studio</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src='//libtl.com/sdk.js' data-zone='11602199' data-sdk='show_11602199'></script>
+  ${FAVICON}
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background-color: #f7f6f0;
+      margin: 0;
+      padding: 20px;
+      max-width: 480px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    .top { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
+    .top h1 { font-size: 16px; margin: 0; letter-spacing: 0.5px; }
+    a.back { font-size: 12px; color: #666; text-decoration: none; }
+    .card {
+      background: #fff; border-radius: 8px; padding: 18px; margin: 16px 0;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.05); border: 1px solid #eee;
+    }
+    .card h3 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: #555; }
+    .stat-row { display: flex; gap: 10px; }
+    .stat-row .stat { flex: 1; background: #f7f6f0; border-radius: 6px; padding: 12px; text-align: center; }
+    .stat-row .stat .n { font-size: 20px; font-weight: 600; color: #b5482f; }
+    .stat-row .stat .l { font-size: 11px; color: #888; margin-top: 2px; }
+    .earn-list { display: flex; flex-direction: column; gap: 10px; }
+    .earn-item {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      background: #f7f6f0; border-radius: 6px; padding: 12px 14px;
+    }
+    .earn-item .earn-main .earn-title { font-size: 13px; font-weight: 600; color: #222; }
+    .earn-item .earn-main .earn-sub { font-size: 11px; color: #888; margin-top: 2px; }
+    button.btn {
+      background: #1a1a1a; color: #fff; border: none; padding: 10px 16px; font-size: 12.5px;
+      letter-spacing: 0.5px; cursor: pointer; border-radius: 4px; white-space: nowrap;
+    }
+    button.btn:disabled { background: #ccc; color: #888; cursor: not-allowed; }
+    .msg { font-size: 12px; margin-top: 10px; }
+    .msg.ok { color: #4a5d4a; }
+    .msg.err { color: #d9534f; }
+    .empty { text-align: center; color: #999; padding: 30px 10px; }
+    .note { font-size: 11px; color: #999; margin-top: 14px; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <div style="font-size:20px;">🪙</div>
+    <h1>Earn Credits</h1>
+  </div>
+  <a href="/studio" class="back">← Back to Studio</a>
+
+  <div id="wrap"><div class="empty">Loading…</div></div>
+
+  <p class="note">Watch Ads ကို ကြည့်ပြီးမှ (သို့) Direct Link ကို အနည်းဆုံး သတ်မှတ်ထားတဲ့ အချိန်ဖွင့်ထားမှသာ Credits ရရှိပါမည်။ တစ်နေ့လျှင် type တစ်ခုစီအတွက် ကန့်သတ်ချက် ရှိပါသည်။</p>
+
+  <script>
+    const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+    if (tg) { try { tg.ready(); } catch(e){} }
+    let tgUser = null;
+    try { tgUser = JSON.parse(sessionStorage.getItem('tg_user') || 'null'); } catch(e){}
+    function currentInitData() { return tg && tg.initData ? tg.initData : null; }
+
+    function openInSystemBrowser(url) {
+      if (tg && typeof tg.openLink === 'function') {
+        tg.openLink(url, { try_instant_view: false });
+      } else {
+        window.open(url, '_blank');
+      }
+    }
+
+    const DIRECT_LINKS = {
+      '1': 'https://omg10.com/4/11687740',
+      '2': 'https://omg10.com/4/11687744'
+    };
+
+    let earnStatus = null;
+    let msgTimer = null;
+    function showMsg(text, type) {
+      const el = document.getElementById('earnMsg');
+      if (!el) return;
+      el.textContent = text;
+      el.className = 'msg ' + (type || '');
+      if (msgTimer) clearTimeout(msgTimer);
+      msgTimer = setTimeout(() => { el.textContent = ''; el.className = 'msg'; }, 5000);
+    }
+
+    if (!tgUser || !tgUser.id) {
+      document.getElementById('wrap').innerHTML = '<div class="empty">Telegram App ကနေ ပြန်ဝင်ပေးပါ။</div>';
+    } else {
+      loadEarnStatus();
+    }
+
+    async function loadEarnStatus() {
+      const wrap = document.getElementById('wrap');
+      try {
+        const res = await fetch('/api/earn/status', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ initData: currentInitData() })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          wrap.innerHTML = '<div class="empty">' + (data.error || 'Failed to load') + '</div>';
+          return;
+        }
+        earnStatus = data;
+        renderEarn();
+      } catch (err) {
+        wrap.innerHTML = '<div class="empty">Network error</div>';
+      }
+    }
+
+    function remainingLabel(type) {
+      const used = (earnStatus.todayCounts && earnStatus.todayCounts[type]) || 0;
+      return used + '/' + earnStatus.dailyCap + ' today';
+    }
+
+    function renderEarn() {
+      const wrap = document.getElementById('wrap');
+      wrap.innerHTML = \`
+        <div class="card">
+          <h3>Balance</h3>
+          <div class="stat-row">
+            <div class="stat"><div class="n" id="creditsN">\${earnStatus.credits}</div><div class="l">Credits</div></div>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Watch Ads</h3>
+          <div class="earn-list">
+            <div class="earn-item">
+              <div class="earn-main">
+                <div class="earn-title">Watch Ad (Interstitial)</div>
+                <div class="earn-sub">+\${earnStatus.rewardWatchAd} credits · <span id="cnt-watch_interstitial">\${remainingLabel('watch_interstitial')}</span></div>
+              </div>
+              <button class="btn" id="btnWatchInterstitial" onclick="watchAd('interstitial')">Watch</button>
+            </div>
+            <div class="earn-item">
+              <div class="earn-main">
+                <div class="earn-title">Watch Ad (Popup)</div>
+                <div class="earn-sub">+\${earnStatus.rewardWatchAd} credits · <span id="cnt-watch_popup">\${remainingLabel('watch_popup')}</span></div>
+              </div>
+              <button class="btn" id="btnWatchPopup" onclick="watchAd('popup')">Watch</button>
+            </div>
+            <div class="earn-item">
+              <div class="earn-main">
+                <div class="earn-title">Watch Video Ads</div>
+                <div class="earn-sub">+\${earnStatus.rewardWatchAd} credits · <span id="cnt-watch_video">\${remainingLabel('watch_video')}</span></div>
+              </div>
+              <button class="btn" id="btnWatchVideo" onclick="watchAd('video')">Watch</button>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Direct Open Link</h3>
+          <div class="earn-list">
+            <div class="earn-item">
+              <div class="earn-main">
+                <div class="earn-title">Direct Link 1</div>
+                <div class="earn-sub">+\${earnStatus.rewardDirectLink} credits · <span id="cnt-direct_link_1">\${remainingLabel('direct_link_1')}</span></div>
+              </div>
+              <button class="btn" id="btnDirectLink1" onclick="startDirectLink('1')">Open</button>
+            </div>
+            <div class="earn-item">
+              <div class="earn-main">
+                <div class="earn-title">Direct Link 2</div>
+                <div class="earn-sub">+\${earnStatus.rewardDirectLink} credits · <span id="cnt-direct_link_2">\${remainingLabel('direct_link_2')}</span></div>
+              </div>
+              <button class="btn" id="btnDirectLink2" onclick="startDirectLink('2')">Open</button>
+            </div>
+          </div>
+        </div>
+        <div class="msg" id="earnMsg"></div>
+      \`;
+    }
+
+    function updateAfterReward(credits, type) {
+      earnStatus.credits = credits;
+      earnStatus.todayCounts[type] = (earnStatus.todayCounts[type] || 0) + 1;
+      const creditsEl = document.getElementById('creditsN');
+      if (creditsEl) creditsEl.textContent = credits;
+      const cntEl = document.getElementById('cnt-' + type);
+      if (cntEl) cntEl.textContent = remainingLabel(type);
+    }
+
+    const WATCH_AD_BTN_IDS = { interstitial: 'btnWatchInterstitial', popup: 'btnWatchPopup', video: 'btnWatchVideo' };
+    // Monetag SDK call shape per docs: a single options object.
+    // Rewarded Interstitial (default): show_XXX({ ymid })
+    // Rewarded Popup:                  show_XXX({ type: 'pop', ymid })
+    // 'video' reuses the Interstitial format/call, just tracked separately server-side.
+    function callMonetagSdk(adType, ymid) {
+      const opts = { ymid };
+      if (adType === 'popup') opts.type = 'pop';
+      return show_11602199(opts);
+    }
+
+    async function watchAd(adType) {
+      const btn = document.getElementById(WATCH_AD_BTN_IDS[adType]);
+      if (typeof show_11602199 !== 'function') {
+        showMsg('Ads SDK ကို load လို့ မရသေးပါ — ခဏနေမှ ထပ်ကြိုးစားပါ (AdBlock ပိတ်ထားရင် ဖွင့်ပေးပါ)', 'err');
+        return;
+      }
+      if (btn) btn.disabled = true;
+      try {
+        // STEP 1: server issues a signed, single-use ymid — this is what
+        // actually gets rewarded server-to-server once Monetag confirms the
+        // ad; the frontend can no longer trigger a credit on its own.
+        const startRes = await fetch('/api/earn/watch-ad/start', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ initData: currentInitData(), adType })
+        });
+        const startData = await startRes.json();
+        if (!startRes.ok || !startData.success) {
+          showMsg(startData.error || 'Ad ကို စတင်၍ မရပါ', 'err');
+          if (btn) btn.disabled = false;
+          return;
+        }
+
+        const showFn = () => callMonetagSdk(adType, startData.ymid);
+        const event = await showFn();
+
+        if (event && event.reward_event_type && event.reward_event_type !== 'valued') {
+          showMsg('Ad ပြသပြီးပါပြီ၊ ဒီတစ်ခါ credit မရပါ', 'err');
+          return;
+        }
+
+        // The actual credit is granted by Monetag's server-to-server postback,
+        // which may land a moment after this frontend callback resolves — so
+        // poll our own status endpoint briefly until the balance updates.
+        showMsg('Reward ကို အတည်ပြုနေပါသည်…', 'ok');
+        const beforeCredits = earnStatus.credits;
+        for (let attempt = 0; attempt < 5; attempt++) {
+          await new Promise(r => setTimeout(r, 1500));
+          const res = await fetch('/api/earn/status', {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ initData: currentInitData() })
+          });
+          const data = await res.json();
+          if (res.ok && data.success) {
+            if (data.credits !== beforeCredits) {
+              updateAfterReward(data.credits, 'watch_' + adType);
+              showMsg('+' + (data.credits - beforeCredits) + ' credits ရရှိပါပြီ!', 'ok');
+              return;
+            }
+            earnStatus.todayCounts = data.todayCounts;
+          }
+        }
+        showMsg('Reward လုပ်ဆောင်နေဆဲဖြစ်ပါသည် — ခဏနေ ပြန်စစ်ကြည့်ပါ', 'ok');
+      } catch (e) {
+        // user က ad ကို ကြည့်ဆဲ ပိတ်လိုက်တာ / error ဖြစ်တာ ဖြစ်နိုင်လို့ ဘာမှ credit မပေးပါ
+        showMsg('Ad ကို အပြီးမကြည့်ရသေးပါ', 'err');
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    async function startDirectLink(linkId) {
+      const btn = document.getElementById('btnDirectLink' + linkId);
+      if (btn) btn.disabled = true;
+      try {
+        const res = await fetch('/api/earn/direct-link/start', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ initData: currentInitData(), linkId })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          showMsg(data.error || 'Link ကို ဖွင့်၍ မရပါ', 'err');
+          if (btn) btn.disabled = false;
+          return;
+        }
+        openInSystemBrowser(DIRECT_LINKS[linkId]);
+        let remaining = data.waitSeconds;
+        if (btn) btn.textContent = remaining + 's…';
+        const countdown = setInterval(() => {
+          remaining--;
+          if (remaining <= 0) {
+            clearInterval(countdown);
+            claimDirectLink(linkId, data.token, btn);
+          } else if (btn) {
+            btn.textContent = remaining + 's…';
+          }
+        }, 1000);
+      } catch (e) {
+        showMsg('Network error', 'err');
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    async function claimDirectLink(linkId, token, btn) {
+      if (btn) btn.textContent = 'Claiming…';
+      try {
+        const res = await fetch('/api/earn/direct-link/claim', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ initData: currentInitData(), token })
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          updateAfterReward(data.credits, 'direct_link_' + linkId);
+          showMsg('+' + data.rewarded + ' credits ရရှိပါပြီ!', 'ok');
+        } else {
+          showMsg(data.error || 'Reward ရယူ၍ မရပါ', 'err');
+        }
+      } catch (e) {
+        showMsg('Network error', 'err');
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Open'; }
+      }
+    }
+  </script>
+</body>
+</html>`;
+}
 
 function getApiDocsHtml() {
   return `<!DOCTYPE html>
