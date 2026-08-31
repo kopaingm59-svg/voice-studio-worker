@@ -2322,6 +2322,17 @@ async function handleEarnPostback(request, env, corsHeaders, pathSecret) {
   const eventType = url.searchParams.get('event') || url.searchParams.get('event_type') || '';
   const rewardEventType = url.searchParams.get('value') || url.searchParams.get('reward_event_type') || '';
 
+  // Log every incoming postback (per Monetag's own recommendation) — this is
+  // the fastest way to confirm whether Monetag is calling us at all, and
+  // with what parameters, when debugging "ad shows but no credit" issues.
+  // View live with: wrangler tail
+  console.log('Monetag postback received:', {
+    ymid, eventType, rewardEventType,
+    zone_id: url.searchParams.get('zone') || url.searchParams.get('zone_id'),
+    sub_zone_id: url.searchParams.get('sub') || url.searchParams.get('sub_zone_id'),
+    telegram_id: url.searchParams.get('telegram_id'),
+  });
+
   await ensureEarnTables(env);
 
   // Always try to return 200 for well-formed-but-uninteresting events so
