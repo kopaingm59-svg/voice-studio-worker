@@ -67,9 +67,6 @@ export default {
       if (url.pathname === '/api/generate' && request.method === 'POST') {
         return await handleGenerateStart(request, env, corsHeaders);
       }
-      if (url.pathname === '/api/generate/srt' && request.method === 'POST') {
-        return await handleGenerateSrtStart(request, env, corsHeaders);
-      }
       if (url.pathname === '/api/generate/status' && request.method === 'POST') {
         return await handleGenerateStatus(request, env, corsHeaders);
       }
@@ -1659,7 +1656,7 @@ async function safeJsonParse(res) {
 
 async function handleGenerateStart(request, env, corsHeaders) {
   const body = await request.json();
-  const { initData, text, refAudioBase64, promptText, voiceType, voicePresetId, emotion } = body;
+  const { initData, text, refAudioBase64, promptText, voiceType, voicePresetId } = body;
 
   // client ပို့လိုက်တဲ့ userId ကို လုံးဝ မယုံပါ — Telegram initData signature ကို verify
   // လုပ်ပြီး ဒီ request ကို ပို့သူ ဟုတ်/မဟုတ် သေချာအောင် စစ်ဆေးပါသည်
@@ -1748,10 +1745,6 @@ async function handleGenerateStart(request, env, corsHeaders) {
         if (finalPromptText && finalPromptText.trim()) input.prompt_text = finalPromptText.trim();
       }
       if (voiceType) input.voice_type = voiceType;
-      // Emotion/speaking-style ("angry"/"sad"/"happy"/...) — handler.py ဘက်က
-      // VoxCPM2 "Style Control" prefix အဖြစ် အသုံးပြုမည် (reference audio ပါ/မပါ
-      // နှစ်မျိုးလုံးမှာ အလုပ်လုပ်သည်)
-      if (emotion) input.emotion = emotion;
 
       const runRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/run`, {
         method: 'POST',
@@ -1790,122 +1783,6 @@ async function handleGenerateStart(request, env, corsHeaders) {
 
   return json(
     { success: true, jobId, cost, remainingCredits: currentCredits },
-    200,
-    corsHeaders
-  );
-}
-
-async function handleGenerateSrtStart(request, env, corsHeaders) {
-  const body = await request.json();
-  const { initData, srtSegments, refAudioBase64, promptText, voiceType, voicePresetId, emotion } = body;
-
-  const userId = await getVerifiedTelegramUserId(initData, env);
-  if (!userId) {
-    return json({ error: 'Unauthorized' }, 401, corsHeaders);
-  }
-  const userStatus = await env.DB.prepare('SELECT is_banned FROM users WHERE id = ?1').bind(userId).first();
-  if (userStatus && userStatus.is_banned) {
-    return json({ error: 'သင့်အကောင့်ကို ပိတ်ထားပါသည်။ Admin ကို ဆက်သွယ်ပါ။' }, 403, corsHeaders);
-  }
-  if (await isGenerateRateLimited(env, userId)) {
-    return json({ error: 'Request အလွန်များနေပါသည် — ခဏစောင့်ပြီး ထပ်ကြိုးစားပါ' }, 429, corsHeaders);
-  }
-  if (!Array.isArray(srtSegments) || srtSegments.length === 0) {
-    return json({ error: '.srt file ကို frontend ကနေ cue array အဖြစ် parse မလုပ်ရသေးပါ' }, 400, corsHeaders);
-  }
-  if (srtSegments.length > 500) {
-    return json({ error: '.srt cue အရေအတွက် 500 ထက် ကျော်နေပါသည်' }, 400, corsHeaders);
-  }
-  if (!env.RUNPOD_API_KEY || !env.RUNPOD_ENDPOINT_ID) {
-    return json({ error: 'RunPod environment variables missing' }, 500, corsHeaders);
-  }
-  if (refAudioBase64) {
-    const refBytes = safeDecodeBase64(refAudioBase64, 20 * 1024 * 1024);
-    if (!refBytes) {
-      return json({ error: 'Reference audio file သိပ်ကြီးလွန်း (သို့) ပျက်နေပါသည်' }, 400, corsHeaders);
-    }
-    if (!looksLikeAudio(refBytes)) {
-      return json({ error: 'Reference audio file format မှားနေပါသည်' }, 400, corsHeaders);
-    }
-  }
-
-  // Client ပို့လိုက်တဲ့ cue array ကို လုံးဝ မယုံပါ — start_ms/end_ms/text ကို server ဘက်ကနေ
-  // ပြန်စစ်ပြီး valid cue များကိုသာ ယူသည် (cost ကို ဒီထဲကနေမှ တွက်ချက်မှာမို့ တိကျရပါမည်)
-  const cues = [];
-  let totalChars = 0;
-  for (const seg of srtSegments) {
-    const cueText = (seg && seg.text ? String(seg.text) : '').trim();
-    const startMs = Number(seg && seg.start_ms);
-    const endMs = Number(seg && seg.end_ms);
-    if (!cueText || !Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) continue;
-    const clippedText = cueText.slice(0, 2000);
-    cues.push({ index: seg.index, start_ms: startMs, end_ms: endMs, text: clippedText });
-    totalChars += clippedText.length;
-  }
-  if (cues.length === 0) {
-    return json({ error: '.srt file ထဲမှာ valid cue တစ်ခုမှ မတွေ့ပါ' }, 400, corsHeaders);
-  }
-
-  const cost = totalChars;
-  const currentCredits = await getEffectivePlanCredits(env, userId);
-  if (currentCredits < cost) {
-    return json(
-      { error: `Credits မလုံလောက်ပါ။ လိုအပ်ချက်: ${cost}, လက်ကျန်: ${currentCredits}` },
-      402,
-      corsHeaders
-    );
-  }
-
-  let finalRefAudio = refAudioBase64;
-  let finalPromptText = promptText;
-  if (voicePresetId) {
-    const preset = await env.DB.prepare('SELECT audio_base64, prompt_text FROM voice_presets WHERE id = ?1')
-      .bind(Number(voicePresetId))
-      .first();
-    if (!preset) {
-      return json({ error: 'ရွေးထားတဲ့ Voice Preset မတွေ့ပါ' }, 400, corsHeaders);
-    }
-    finalRefAudio = preset.audio_base64;
-    finalPromptText = (promptText && promptText.trim()) ? promptText.trim() : preset.prompt_text;
-  }
-
-  // Cue အားလုံးကို job တစ်ခုတည်းအဖြစ်ပဲ ပို့ပါသည် (handler.py ဘက်က GPU worker တစ်ခုတည်းထဲမှာ
-  // cue တစ်ခုချင်းစီကို sequential generate လုပ်ပြီး slot duration အတိအကျ ကိုက်ညီအောင် stretch/
-  // pad ကာ တစ်ခုတည်းသော .wav အဖြစ် ပေါင်းစည်းပေးမည်) — handleGenerateStart ရဲ့ text-chunk
-  // parallel-job pattern မလိုအပ်ပါ (cue တစ်ခုချင်းစီက subtitle-length အတိုသာ ဖြစ်တာမို့)
-  const input = { srt_segments: cues };
-  if (finalRefAudio) {
-    input.reference_audio_base64 = finalRefAudio;
-    if (finalPromptText && finalPromptText.trim()) input.prompt_text = finalPromptText.trim();
-  }
-  if (voiceType) input.voice_type = voiceType;
-  if (emotion) input.emotion = emotion;
-
-  const runRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/run`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${env.RUNPOD_API_KEY}`,
-    },
-    body: JSON.stringify({ input }),
-  });
-
-  const parsed = await safeJsonParse(runRes);
-  if (!parsed.ok) {
-    return json({ error: 'RunPod ကနေ response မှားနေပါသည် — ခဏနေမှ ထပ်ကြိုးစားပါ (server ခေတ္တ busy ဖြစ်နေနိုင်ပါသည်)' }, 502, corsHeaders);
-  }
-  if (!runRes.ok || !parsed.data.id) {
-    return json({ error: parsed.data.error || 'RunPod request failed' }, 502, corsHeaders);
-  }
-  const jobId = parsed.data.id;
-
-  // NOTE: srt-batch job တစ်ခုကို job id တစ်ခုတည်းသာ ရလာမှာမို့ (chunk-splitting မလိုအပ်ပါ)
-  // — ရှိပြီးသား handleGenerateStatus route ကိုပဲ ပြောင်းလဲစရာ လိုအပ်ချက် လုံးဝမရှိဘဲ တိုက်ရိုက်
-  // ပြန်သုံးနိုင်ပါသည် (frontend ကလည်း /api/generate/status ကို ယခင်အတိုင်း Poll လုပ်ရုံပါ)
-  await logRequestStart(env, { userId, jobId, source: 'miniapp-srt', textLength: cost });
-
-  return json(
-    { success: true, jobId, cost, remainingCredits: currentCredits, cueCount: cues.length },
     200,
     corsHeaders
   );
@@ -2428,7 +2305,7 @@ async function handleEarnDirectLinkClaim(request, env, corsHeaders) {
 
 async function handleApiV1Generate(request, env, corsHeaders) {
   const body = await request.json().catch(() => ({}));
-  const { apiKey, text, refAudioBase64, promptText, voiceType, voicePresetId, emotion } = body;
+  const { apiKey, text, refAudioBase64, promptText, voiceType, voicePresetId } = body;
 
   if (!apiKey) {
     return json({ error: 'Missing apiKey' }, 401, corsHeaders);
@@ -2500,7 +2377,6 @@ async function handleApiV1Generate(request, env, corsHeaders) {
     if (finalPromptText && finalPromptText.trim()) input.prompt_text = finalPromptText.trim();
   }
   if (voiceType) input.voice_type = voiceType;
-  if (emotion) input.emotion = emotion;
 
   const runRes = await fetch(`https://api.runpod.ai/v2/${env.RUNPOD_ENDPOINT_ID}/run`, {
     method: 'POST',
@@ -4015,13 +3891,6 @@ ${FAVICON}
           <label for="textInput">Text to speak <span class="req">*</span></label>
           <textarea id="textInput" placeholder="Write what you want the voice to say…"></textarea>
           <div class="charcount"><span id="charLen">0</span> characters = <span id="charCost">0</span> credits</div>
-
-          <div class="srtupload" id="srtUploadWrap" style="margin-top:14px; border-top:1px solid rgba(255,255,255,0.08); padding-top:14px;">
-            <label for="srtFileInput">— or — .srt subtitle file ဖြင့် dub လုပ်ခြင်း
-              <span class="optional">(cue timing အတိအကျ ကိုက်အောင် auto ချိန်ညှိမည်)</span></label>
-            <input type="file" id="srtFileInput" accept=".srt">
-            <div class="hint" id="srtSummary" style="font-size:11.5px; color:#888; margin-top:6px; line-height:1.5;"></div>
-          </div>
         </div>
       </div>
     </section>
@@ -4093,10 +3962,6 @@ ${FAVICON}
             <span class="spinner" id="spinner"></span>
             <span id="generateLabel">Generate speech</span>
           </button>
-          <button class="generate" id="generateSrtBtn" type="button" style="display:none; margin-top:10px;">
-            <span class="spinner" id="spinnerSrt"></span>
-            <span id="generateSrtLabel">Generate from .srt</span>
-          </button>
           <div class="status" id="statusLine"></div>
 
           <div class="output" id="output">
@@ -4149,13 +4014,6 @@ ${FAVICON}
   const generateLabel = $('generateLabel');
   const spinner       = $('spinner');
   const statusLine    = $('statusLine');
-
-  const srtFileInput   = $('srtFileInput');
-  const srtSummary     = $('srtSummary');
-  const generateSrtBtn = $('generateSrtBtn');
-  const generateSrtLabel = $('generateSrtLabel');
-  const spinnerSrt      = $('spinnerSrt');
-  let srtCues = null;
 
   const output       = $('output');
   const audioPlayer   = $('audioPlayer');
@@ -4319,104 +4177,6 @@ ${FAVICON}
     spinner.classList.toggle('on', isBusy);
     generateLabel.textContent = isBusy ? 'Generating…' : 'Generate speech';
   }
-  function setBusySrt(isBusy){
-    generateSrtBtn.disabled = isBusy;
-    spinnerSrt.classList.toggle('on', isBusy);
-    generateSrtLabel.textContent = isBusy ? 'Generating…' : 'Generate from .srt';
-  }
-
-  // "00:00:01,500" (SRT timestamp) ကို milliseconds integer အဖြစ် ပြောင်းသည်
-  function parseSrtTimestamp(ts) {
-    const m = /(\d+):(\d{2}):(\d{2})[,.](\d{1,3})/.exec((ts || '').trim());
-    if (!m) return null;
-    const [, h, min, s, ms] = m;
-    return (Number(h) * 3600 + Number(min) * 60 + Number(s)) * 1000 + Number(ms.padEnd(3, '0'));
-  }
-
-  // .srt file content တစ်ခုလုံးကို [{index, start_ms, end_ms, text}, ...] cue array
-  // အဖြစ် parse လုပ်ပေးသည် — cue text က line 2+ ခု ရှိနိုင်လို့ join('\\n') နဲ့ ပေါင်းထားသည်
-  // (handler.py ဘက်က speaker/emotion tag ကို ပထမ line ကနေသာ ဖတ်မှာမို့ ပြဿနာ မရှိပါ)
-  function parseSrt(content) {
-    const blocks = content.replace(/\r\n/g, '\n').split(/\n\s*\n/);
-    const cues = [];
-    for (const block of blocks) {
-      const lines = block.split('\n').map(l => l.trim()).filter(Boolean);
-      if (lines.length < 2) continue;
-      let li = 0;
-      let index = null;
-      if (/^\d+$/.test(lines[0])) { index = Number(lines[0]); li = 1; }
-      const timeMatch = /(.+?)-->\s*(.+)/.exec(lines[li] || '');
-      if (!timeMatch) continue;
-      const startMs = parseSrtTimestamp(timeMatch[1]);
-      const endMs = parseSrtTimestamp(timeMatch[2]);
-      const text = lines.slice(li + 1).join('\n').trim();
-      if (startMs == null || endMs == null || !text) continue;
-      cues.push({ index: index != null ? index : cues.length + 1, start_ms: startMs, end_ms: endMs, text });
-    }
-    return cues;
-  }
-
-  srtFileInput.addEventListener('change', () => {
-    const file = srtFileInput.files && srtFileInput.files[0];
-    if (!file) { srtCues = null; generateSrtBtn.style.display = 'none'; srtSummary.textContent = ''; return; }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const cues = parseSrt(String(reader.result || ''));
-      if (!cues.length) {
-        srtCues = null;
-        generateSrtBtn.style.display = 'none';
-        srtSummary.textContent = '.srt file ထဲမှာ cue မတွေ့ပါ — file format ကို ပြန်စစ်ပါ။';
-        return;
-      }
-      srtCues = cues;
-      const totalChars = cues.reduce((sum, c) => sum + c.text.length, 0);
-      const lastEndS = (cues[cues.length - 1].end_ms / 1000).toFixed(1);
-      srtSummary.textContent = \`Cue \${cues.length} ခု ✓ (~\${totalChars} credits ကုန်ကျမည်, video length ~\${lastEndS}s)\`;
-      generateSrtBtn.style.display = 'block';
-    };
-    reader.onerror = () => { srtSummary.textContent = 'File ဖတ်ရာတွင် error ဖြစ်ပါသည်.'; };
-    reader.readAsText(file);
-  });
-
-  generateSrtBtn.addEventListener('click', async () => {
-    if (polling || !tgUser || !srtCues) return;
-    const totalChars = srtCues.reduce((sum, c) => sum + c.text.length, 0);
-    if (totalChars > currentCredits) {
-      setStatus('Credits မလုံလောက်ပါ (လိုအပ်: ' + totalChars + ', လက်ကျန်: ' + currentCredits + ')', 'err');
-      return;
-    }
-
-    output.classList.remove('show');
-    setBusySrt(true);
-    setStatus('Sending .srt request…');
-
-    try {
-      const startRes = await fetch('/api/generate/srt', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          initData: currentInitData(),
-          srtSegments: srtCues,
-          refAudioBase64: presetVoiceSelect.value ? undefined : (refAudioBase64 || undefined),
-          promptText: promptTextEl.value.trim() || undefined,
-          voiceType: voiceTypeSelect.value,
-          voicePresetId: presetVoiceSelect.value || undefined
-        })
-      });
-      const startData = await startRes.json();
-      if (!startRes.ok || !startData.success) {
-        throw new Error(startData.error || 'Request failed');
-      }
-
-      polling = true;
-      await pollForResult(startData.jobId, startData.cost);
-    } catch (err) {
-      setStatus(err.message || 'Something went wrong.', 'err');
-    } finally {
-      setBusySrt(false);
-      polling = false;
-    }
-  });
 
   generateBtn.addEventListener('click', async () => {
     if (polling || !tgUser) return;
@@ -5504,20 +5264,18 @@ function getApiDocsHtml() {
   "text": "မင်္ဂလာပါ",
   "refAudioBase64": "",        // Optional - voice cloning
   "promptText": "",            // Optional - reference audio ရဲ့ transcript
-  "voiceType": "",             // Optional - "female" | "male" | "child" | "multi"
-  "voicePresetId": "",         // Optional - Admin ကြိုတင်တင်ထားတဲ့ Voice preset ID (refAudioBase64 ထက် priority ရှိသည်)
-  "emotion": ""                // Optional - "angry" | "sad" | "happy" | "excited" | "calm" | "serious" | "whisper" | "fear" | "surprised"
+  "voiceType": "",             // Optional - "female" | "male"
+  "voicePresetId": ""          // Optional - Admin ကြိုတင်တင်ထားတဲ့ Voice preset ID (refAudioBase64 ထက် priority ရှိသည်)
 }</pre>
 
   <table>
     <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
     <tr><td>apiKey</td><td>string</td><td>Yes</td><td>Profile page ကနေ ရထားတဲ့ API Key</td></tr>
-    <tr><td>text</td><td>string</td><td>Yes</td><td>ထွက်လိုတဲ့ စာသား — အသံထွက်ရာမှာ ရယ်သံ/သက်ပြင်းချသံ ထည့်ချင်ရင် [laughing] (သို့) [sigh] ကို စာသားထဲ တိုက်ရိုက် ထည့်နိုင်သည် (ဥပမာ - "ဟုတ်လား [laughing] တကယ်ကြောက်တယ်")</td></tr>
+    <tr><td>text</td><td>string</td><td>Yes</td><td>ထွက်လိုတဲ့ စာသား</td></tr>
     <tr><td>refAudioBase64</td><td>string</td><td>No</td><td>Voice cloning အတွက် reference audio (base64 WAV)</td></tr>
     <tr><td>promptText</td><td>string</td><td>No</td><td>reference audio ထဲက စာသား (cloning quality တိုးစေသည်)</td></tr>
     <tr><td>voiceType</td><td>string</td><td>No</td><td>"female" or "male" (reference audio မပါရင်သာ အလုပ်လုပ်သည်)</td></tr>
     <tr><td>voicePresetId</td><td>number</td><td>No</td><td>Admin ကြိုတင် upload ထားတဲ့ voice preset ID — ဒါပါလာရင် refAudioBase64 အစား ဒီ preset ရဲ့ အသံကို သုံးပါမည်</td></tr>
-    <tr><td>emotion</td><td>string</td><td>No</td><td>ပြောဟန်/ခံစားချက် (ဒေါသ/ဝမ်းနည်း/ပျော်ရွှင် စသည်) — refAudioBase64 (voice cloning) ပါလည်း၊ မပါလည်း အလုပ်လုပ်သည်</td></tr>
   </table>
 
   <h3>Response (200)</h3>
@@ -5542,51 +5300,6 @@ function getApiDocsHtml() {
   <h2>2. Check Generation Status</h2>
   <span class="badge">POST</span><code>/api/v1/generate/status</code>
   <p>Generate request ပြီးနောက် ရရှိလာတဲ့ <code>jobId</code> ကို 1–2 စက္ကန့်တစ်ခါ Poll လုပ်ပြီး status စစ်ပါ။</p>
-
-  <h2>Emotion &amp; Expressive Speech</h2>
-  <p>Angry/sad/happy စတဲ့ ခံစားချက်ဟန်၊ ရယ်သံ/သက်ပြင်းချသံ စတဲ့ non-verbal sound တွေကို audio output ထဲ ထည့်ဖို့ နည်းလမ်း <strong>နှစ်မျိုး</strong> ရှိပါတယ် — တစ်မျိုးချင်းစီကိုပဲ သုံးပါ၊ နှစ်မျိုးစလုံး တစ်ပြိုင်နက် မသုံးပါနှင့်။</p>
-
-  <h3>Option A — <code>emotion</code> field (ပိုလွယ်သည်)</h3>
-  <pre>{
-  "apiKey": "kpv_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-  "text": "ဒီအကြောင်းအရာကို ငါလုံးဝ လက်မခံနိုင်ဘူး",
-  "emotion": "angry"
-}</pre>
-  <table>
-    <tr><th>Value</th><th>Meaning</th></tr>
-    <tr><td>angry</td><td>ဒေါသ</td></tr>
-    <tr><td>sad</td><td>ဝမ်းနည်း</td></tr>
-    <tr><td>happy</td><td>ပျော်ရွှင်</td></tr>
-    <tr><td>excited</td><td>စိတ်လှုပ်ရှား</td></tr>
-    <tr><td>calm</td><td>ဖြည်းညင်း/တည်ငြိမ်</td></tr>
-    <tr><td>serious</td><td>တည်ကြည်/သေသေချာချာ</td></tr>
-    <tr><td>whisper</td><td>တိုးတိုးလေး</td></tr>
-    <tr><td>fear</td><td>ကြောက်ရွံ့</td></tr>
-    <tr><td>surprised</td><td>အံ့သြ</td></tr>
-  </table>
-  <p style="font-size:12px; color:#888;"><code>refAudioBase64</code> (voice cloning) ပါလည်း၊ မပါလည်း <code>emotion</code> field က အလုပ်လုပ်ပါသည် — cloned voice ရဲ့ timbre ကို မထိခိုက်ဘဲ ပြောဟန်ကိုသာ ပြောင်းပေးပါသည်။</p>
-
-  <h3>Option B — Text ထဲမှာ ကိုယ်တိုင်ရေးခြင်း (ပိုချုံ့ချယ်နိုင်သည်)</h3>
-  <p><code>emotion</code> field အစား, <code>text</code> ရှေ့ဆုံးမှာ <code>( ... )</code> ဖြင့် instruction တစ်ခု ကိုယ်တိုင် ရေးထည့်လို့ရပါသည် (English/Burmese နှစ်မျိုးလုံး ရေးနိုင်သည်):</p>
-  <pre>{
-  "apiKey": "kpv_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-  "text": "(ဝမ်းနည်းစွာ၊ တိုးတိုးလေး ပြောနေတဲ့ အသံနဲ့) သူ့ကို နောက်တစ်ခါ ပြန်တွေ့ရမလားတောင် မသိတော့ဘူး"
-}</pre>
-  <p style="font-size:12px; color:#888;">ဒီနည်းလမ်းသုံးမယ်ဆိုရင် <code>emotion</code> field ကို ဗလာချန်ထားပါ — <code>emotion</code> field ပါလာရင် server က <code>()</code> prefix ကို auto ထပ်ထည့်ပေးလို့ instruction နှစ်ခု ရောသွားနိုင်ပါသည်။</p>
-
-  <h3>Non-verbal Sound Tags</h3>
-  <p><code>text</code> ထဲက ဘယ်နေရာမဆို <code>[laughing]</code> (ရယ်သံ) (သို့) <code>[sigh]</code> (သက်ပြင်းချသံ) ကို ထည့်နိုင်ပါသည် — <code>[laugh]</code>, <code>[ရယ်]</code>, <code>[တောက်ခေါက်]</code>, <code>[သက်ပြင်းချသံ]</code> စတဲ့ ပိုလွယ်တဲ့ tag တွေရေးလည်း auto ပြောင်းပေးပါသည်။ Tag တွေကို ရှားရှားပါးပါး သုံးပါ — line တစ်ကြောင်းထဲ tag အများကြီး ထပ်ထည့်ရင် output ထူးဆန်းသွားနိုင်ပါသည်။</p>
-  <pre>{
-  "text": "ဟုတ်လား [laughing] တကယ်ကြောက်စရာကောင်းတယ်"
-}</pre>
-
-  <h3>Multi-voice Dialogue မှာ Per-line Emotion</h3>
-  <p><code>voiceType: "multi"</code> နဲ့ speaker tag (<code>F:</code>/<code>M:</code>/<code>C:</code>) သုံးထားရင် line တစ်ကြောင်းချင်းစီအတွက် emotion သီးခြား ထည့်ချင်ရင် tag ရဲ့ နောက်မှာ <code>(emotion)</code> ပိုနေရင် ရေးနိုင်ပါသည်:</p>
-  <pre>{
-  "text": "F: မင်္ဂလာပါ ခင်ဗျာ\nM(angry): ဟုတ်ကဲ့ ဒါပေမဲ့ မကျေနပ်လိုက်တာ [sigh]\nC(happy): ကျွန်တော်လည်း ပါဝင်မယ်",
-  "voiceType": "multi"
-}</pre>
-  <p style="font-size:12px; color:#888;">Line တစ်ကြောင်းမှာ <code>(emotion)</code> မပါရင် ယခင် speaker ရဲ့ voice ကိုသာ ဆက်သုံးမည်၊ emotion ကတော့ tag အသစ်ပြန်ရေးမှသာ အလုပ်လုပ်မည် (default အနေနဲ့ neutral ပြန်ဖြစ်သွားမည်)။</p>
 
   <h3>Request Body</h3>
   <pre>{
